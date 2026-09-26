@@ -25,17 +25,48 @@ keyword collisions, effect hierarchy), then open the sub-skill for your task.
 
 ## Installation
 
-The `SKILL.md` + `skill.yaml` + `<name>/SKILL.md` layout follows the
-`.pi/skills/` convention used by coding agents.  To install into an agent's
-skill directory:
+These skills follow the [Agent Skills](https://agentskills.io/specification)
+format, so any agentic coding harness that supports it can load them.  You
+clone the repo once, then point your harness's skill directory at it (via a
+symlink) — the Git repo stays the single source of truth, and updates are a
+`git pull`.
+
+### 1. Clone the repo
 
 ```bash
-mkdir -p ~/.pi/skills/fstar
-cp -R SKILL.md skill.yaml fstar-*/ ~/.pi/skills/fstar/
+git clone https://github.com/<you>/fstar-skills ~/repos/fstar-skills
 ```
 
-The files are plain Markdown, so they also read fine standalone — each
-`SKILL.md` is a self-contained reference with cross-links to the others.
+### 2. Link it into your harness's skill directory
+
+Symlink the cloned repo into the skill directory of each harness you use:
+
+| Harness | Skill directory |
+|---|---|
+| Claude Code | `~/.claude/skills/` |
+| OpenAI Codex | `~/.codex/skills/` |
+| Cline | `~/.cline/skills/` |
+| Pi | `~/.pi/agent/skills/` |
+
+```bash
+mkdir -p ~/.claude/skills
+ln -s ~/repos/fstar-skills ~/.claude/skills/fstar
+```
+
+(Repeat the `ln -s` for each harness, replacing `~/.claude/skills` with the
+other directories above.)
+
+### 3. Update
+
+```bash
+cd ~/repos/fstar-skills && git pull
+```
+
+Because the symlink points at the cloned repo, a `git pull` is all it takes to
+pick up changes — no re-copying.
+
+The files are plain Markdown, so they also read standalone: each `SKILL.md` is
+a self-contained reference with cross-links to the others.
 
 ## License
 
