@@ -1,0 +1,25 @@
+name: fstar
+description: F* programming language for verified systems
+
+rules: |
+  ## F* Core Syntax Rules
+
+  - Custom operators use `let ( <op> ) args = body` with whitespace around parens
+  - Numeric types use module syntax: `FStar.UInt64.t`, `FStar.Int32.t`, NOT `u64`, `int32`
+  - `a * b` is a TUPLE TYPE, not multiplication — `open FStar.Mul` for multiply
+  - Record types with function fields need `noeq` to skip decidable-equality proof
+  - Mutually recursive types use `and`, not `noeq`
+  - `decreases` goes inside the return type: `Tot result (decreases x)`
+
+  ## Effects
+
+  - `Tot a` — total pure
+  - `GTot a` — total ghost (erased at extraction)
+  - `Lemma (requires pre) (ensures post)` — squashed proof
+  - `Stack` — Low* stateful, extractable to C
+
+  ## Module Syntax
+
+  - `FStar.UInt8.t`, `FStar.UInt16.t`, `FStar.UInt32.t`, `FStar.UInt64.t`
+  - `FStar.Int8.t`, etc.
+  - `FStar.Seq.seq`, `FStar.List.list`
