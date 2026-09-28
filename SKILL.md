@@ -20,6 +20,13 @@ with C/OCaml/WASM extraction.  This skill is split into focused sub-skills.
 > `(* *)` comments into invalid `//` comments and crash on `#lang-pulse`
 > modules.  Leave `.fst`/`.fsti` hand-formatted (see
 > [fstar-2026.09.20 §7](fstar-2026.09.20/SKILL.md)).
+>
+> ⚠️ **Comment *layout* near the varint arithmetic lemmas is SMT-load-bearing.**
+> In ≥ v2026.09.20, collapsing the fragmentary `(** *)` one-liners around
+> `nbytes_of_varint`/`lemma_varint_*byte_arithmetic` into single blocks shifts
+> line numbers and re-triggers the non-terminating Pulse varint roundtrip hang
+> (100% CPU z3).  "Comment-only" edits are *not* safe there — see
+> [fstar-2026.09.20 §3 rule 6](fstar-2026.09.20/SKILL.md).
 
 ## Quick Reference
 

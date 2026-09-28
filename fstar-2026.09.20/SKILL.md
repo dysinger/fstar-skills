@@ -83,6 +83,18 @@ fstar.exe --codegen Custard \
   this is library mode (the other backends call it `--extract_module`).
   `--custard_main` names a `main : unit -> Int32.t` to *invoke* on startup;
   `--custard_entry` names a *single* root.
+
+  **Export-surface gotcha (don't re-claim "N fns exported").** With
+  `--custard_entry Data.Codec.Pulse.encode_bytes --custard_entry
+  Data.Codec.Pulse.decode_bytes`, the emitted `fstar_codec.h`/C file exports
+  **only those two named roots** — the individual `encode_token`/`decode_token`/
+  `encode_uint8`/… leaf functions are **not** independently callable, and the
+  roundtrip `Lemma`s are erased in any case.  A claim like "18 API fns + 9
+  roundtrip lemmas exported" is **false** for a single-root build; the only
+  exported surface is the dispatch pair (plus whatever `type`s the roots need).
+  If the *full* surface must be exported, use `--custard_entry_module`, and
+  then `noextract`-guard every spec-only def you don't want rooted (see §3).
+
 - A **library has no `main`** — use `--custard_entry_module`, not
   `--custard_main`.
 
@@ -232,6 +244,25 @@ Rules learned (2026.09.20 era):
 5. **`varint_decode_expected`/`varint_encode_pred` remain `noextract`** even
    with the SMTPat lemma added; the lemma itself is `noextract` and references
    `Seq`/`Prims.int`, so it must not be rooted.
+6. **Comment line *positions* in the varint region of the pure module are
+   SMT-load-bearing.**  Collapsing the fragmentary `(** … *)` one-liner
+   comments around `nbytes_of_varint` / `lemma_nbytes_of_varint_bound` /
+   `lemma_varint_*byte_arithmetic` in `Data.Codec.Types` into single coherent
+   blocks shifts those lemmas' line numbers.  That shift perturbs the
+   `[SMTPat (varint_decode_expected i (U32.uint_to_t (nbytes_of_varint (U32.v v))) s)]`
+   trigger's unification and **deterministically** tips `Data.Codec.Pulse`'s
+   varint roundtrip back into the non-terminating z3 spin (reproduced 4× at
+   the same module, ~100% CPU, `ps` shows no `stopped` state).
+
+   **Do NOT "clean up"/collapse the varint-region comment lines.**  "Comment-only"
+   edits are *not* safe there — F\*'s source positions feed SMT name/pattern
+   generation, so a doc-comment merge that changes line counts is a *semantic*
+   perturbation to the already-fragile varint query.  (The non-varint stacked
+   fsdoc collapses — `nat_of_int`, `u32_of_nat`, `mk_decode_error`,
+   `string_is_ascii`, `u32_of_small_nat` — are safe and landed.)  This is the
+   canonical example of why the Pulse leaf's "varint must stay LAST"
+   declaration-order rule extends to *comment layout adjacent to the varint
+   arithmetic lemmas*.
 
 ## 4. Build / nix wiring for the new toolchain
 
@@ -260,6 +291,28 @@ Makefile uses `--no_default_includes`):
 - `karamel` is **fully removed** — it was an in-tree F\* submodule used only to
   install `krml`; neutralize the `make -C karamel install` step with a no-op
   `karamel/Makefile` + `FSTAR_USE_KRML_EXE=1`.
+- **Exposing the overlay's `z3` back out as a top-level attr overflows the nix
+  fixpoint.**  The F\* flake derives z3 from the fork's tree via
+  `z3 = prev.callPackage (inputs.fstar + "/.nix/z3.nix") {}` (pins z3 4.13.3,
+  the version the bootstrap needs — plain `pkgs.z3` from the same nixpkgs rev
+  is **4.16.0**, the wrong one).  If you `inherit z3` from that overlay so a
+  `devShells.default.buildInputs` can list it, `nix develop` (and any build
+  consuming that attr) fails with `error: stack overflow; max-call-depth
+  exceeded` while evaluating `buildInputs` — the overlay's `callPackage`
+  self-references once the attr is folded back into the fixpoint.  **Don't**
+  re-export overlay-internal derivations.
+
+  The z3 is already reachable without a separate attr: the `fstar.exe` install
+  wraps the binary with `wrapProgram … --prefix PATH "" "${z3}/bin"`, so
+  `make check` / `fstar.exe` (and anything launched from the devShell) already
+  finds the correct z3 on the `fstar.exe`'s own PATH.  For the devShell, add
+  `git` + the `dotnet` SDK (for the F# target) but **not** a bare `z3`.
+- `dotnet-sdk_10` (underscore attr) **does** exist in nixpkgs rev `c31cf09…`
+  (resolves to `dotnet-sdk-wrapped-10.0.300`); the earlier worry that the
+  pinned 24.11-era snapshot predates `.NET 10` was wrong.  Reachability of the
+  `dysinger/fstar` fork pin (`cf847952b97a5f392ebd8c097e9f548fa93d769a` at
+  `refs/heads/v2026.09.20+lsp`) is also confirmed via `git ls-remote` — both
+  reproducibility landmines turned out to be non-issues.
 
 ## 5. Common errors in the new surface
 
