@@ -5,6 +5,9 @@ description: F* proof patterns — lemmas, SMTPat, induction, GADT type-refineme
 
 # F\* Proof Patterns
 
+> **Version:** pinned to F\* ≤ 2025.12.15 (Low*/KaRaMeL era).
+> For ≥ v2026.09.20 (Custard/Pulse, `krml`/Low* removed), see
+> [`fstar-2026.09.20`](../fstar-2026.09.20/SKILL.md).
 > Cross-reference: [fstar index](../SKILL.md).
 
 ---

@@ -5,6 +5,9 @@ description: F* core language — types, effects, operators, syntax, modules, ty
 
 # F\* Core Language
 
+> **Version:** pinned to F\* ≤ 2025.12.15 (Low*/KaRaMeL era).
+> For ≥ v2026.09.20 (Custard/Pulse, `krml`/Low* removed), see
+> [`fstar-2026.09.20`](../fstar-2026.09.20/SKILL.md).
 > Extracted from the full F* skill.  Cross-reference: [fstar index](../SKILL.md).
 
 ---

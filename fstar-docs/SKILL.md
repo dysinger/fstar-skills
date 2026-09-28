@@ -5,6 +5,9 @@ description: F* documentation — fsdoc comment format, module headers, LSP hove
 
 # F\* Documentation (fsdoc)
 
+> **Version:** pinned to F\* ≤ 2025.12.15 (Low*/KaRaMeL era).
+> For ≥ v2026.09.20 (Custard/Pulse, `krml`/Low* removed), see
+> [`fstar-2026.09.20`](../fstar-2026.09.20/SKILL.md).
 > Cross-reference: [fstar index](../SKILL.md).
 
 F* uses `(** ... *)` doc comments, identical to OCaml's ocamldoc format.

@@ -5,6 +5,9 @@ description: F* Low* — KaRaMeL C extraction, buffer patterns, Int.Cast wrapper
 
 # F\* Low\* — C Extraction
 
+> **Version:** pinned to F\* ≤ 2025.12.15 (Low*/KaRaMeL era).
+> For ≥ v2026.09.20 (Custard/Pulse, `krml`/Low* removed), see
+> [`fstar-2026.09.20`](../fstar-2026.09.20/SKILL.md).
 > Extracted from the full F* skill.  Cross-reference: [fstar index](../SKILL.md).
 
 ---
@@ -452,3 +455,110 @@ The `=` syntax creates API/implementation bundles controlling monomorphization s
 3. **No `U32.div`** — use `shift_right` for `/256`, `logand` for `%256`.
 4. **Use `U32.t` directly** rather than extracting `nat` then converting back — avoids pow2 opacity.
 5. **Error positions are absolute** — never shift them after recursive calls.
+
+## 15. Rust / Wasm backends — non-C-target limitations (VERIFIED 2026-09-27)
+
+The KaRaMeL C backend is production-ready, but the `rust` and `wasm` backends
+have hard limitations for real Low\* modules (anything using mathematical
+integers or struct-returning functions).  These were root-caused on the
+`fstar-codec` `Data.Codec.Low` module.  Do NOT assume the three backends are
+interchangeable.
+
+### 15.1 Ghost spec predicates must be pruned (the `FStar.List` reachability)
+
+A Low\* module that `open`s a pure combinator module (a `codec a` record type
+full of `list`/`Seq` combinators) does NOT actually leak `FStar.List` into the
+generated C — `ensures`/`requires`/`Lemma` spec code is erased.  What DOES leak
+is a **top-level `let` value/predicate** used only in `ensures` clauses:
+
+- `let p (…) : prop = …` (a pure predicate returning a proposition) is TRIED
+  for extraction and drags `FStar.List.Tot.Base` reachability, breaking rust
+  (`FStar.List.Tot.Base.hd … TODO: PDeref`) and wasm
+  (`FStar.List.Tot.Base.tail … partially applied`).
+- `let f (…) : Pure t … = …` (a pure spec helper consumed only by `ensures` and
+  `Lemma` bodies) is likewise extracted, emitting `Prims_list__uint8_t`
+  (GC'd list) into C.
+
+**Fix**:
+- For a predicate: `noextract` on its own line before `let`:
+  ```fstar
+  noextract
+  let varint_encode_pred (n: nat) (s: Seq.seq U8.t) (i: nat) : prop = …
+  ```
+- For a spec helper returning a CONCRETE extractable type: change the effect
+  `Pure decode_result_c` → `Ghost decode_result_c`:
+  ```fstar
+  let varint_decode_expected (s: Seq.seq U8.t) … : Ghost decode_result_c … = …
+  ```
+  (`Ghost` prunes it from the `.krml`; `Pure` does not.)
+- `[@ noextract]` / `[@@ noextract]` prefix attributes are a SYNTAX ERROR in
+  F* 2025.10.x — use the bare `noextract` keyword on its own line, or `Ghost`.
+
+Verify with: `strings Data_Codec_Low.krml | grep -c varint_encode_pred` → `0`.
+The `.krml` binary itself should contain ZERO `FStar.List` references.
+
+### 15.2 wasm backend cannot return structs by value (no multi-value support)
+
+`AstToCFlat.ml` `size_of` maps a wasm value to a SINGLE `I32`/`I64`.  A `LFlat`
+(flat struct/tagged-union) return type falls through to
+`failwith "size_of: this case should've been eliminated"`.  `decode_result_c`
+(a `DR_Inl of {code;pos} | DR_Inr of {n;value}` variant, 20 bytes / 2 fields)
+is therefore UNRETURNABLE from a wasm-exported function.
+
+- `-fnostruct-passing` and `-by-ref T` do NOT fix it: the `[AstToC♭]` lowering
+  still calls `size_of` on the return type.
+- `-d cflat` shows `Data_Codec_Low_decode_result_c (size=20, 2 fields)` then the
+  `size_of` failure — the struct layout is computed fine; only the single-
+  value RETURN size is impossible.
+- Functions returning machine ints (`encode_* → U32.t`) are wasm-fine; functions
+  returning a sum/record (`decode_* → decode_result_c`) are not.
+- The fix is an API refactor to out-parameters (return `U32.t` status, write
+  `n`/`value`/`code`/`pos` via pointer args) — the classic C ABI pattern.  This
+  is a big change to the 0-admit module, gated behind OpenSpec (Mandate 15).
+
+The template's `wasm` derivation `works` because `Example.fst` returns only
+machine ints — do NOT cargo-cult it onto a struct-returning Low\* module.
+
+### 15.3 rust backend — `krml_checked_int_t` empty type + no runtime crate
+
+`PrintMiniRust.ml:172` maps `Constant.CInt` (the mathematical-int
+`krml_checked_int_t`) to `""` (empty string), so any body using `U32.v`/`U8.v`/
+`%`/`/` emits Rust like `let b4_val:  = crate::prims::op_Modulus(…)` (blank type
+annotation) and `rustc` fails.
+
+Additionally, `-minimal -bundle Mod=\*` emits `crate::fstar::uint8::uint_to_t`,
+`crate::prims::op_Division`, `crate::lowstar::ignore::ignore` references, but
+KaRaMeL ships NO standalone Rust runtime crate for `fstar`/`prims`/`lowstar`
+(unlike the C `libkrmllib.a`).  The KaRaMeL rust-val test harness `sed`-injects
+`mod lowstar { pub mod ignore { … } }` by hand — proof there is no shipped
+runtime.
+
+- Rust extraction only `works` for modules with NO mathematical int ops (the
+  template's bare `add`/`xor`), exactly as C-target `Warning 15` flags
+  "uses mathematical integers".
+- Fixing needs a KaRaMeL patch (`Constant.CInt -> "i64"`) PLUS hand-written
+  `fstar`/`prims`/`lowstar` runtime shims — toolchain work, not source surgery.
+
+### 15.4 Minimal runtime `.krml` set (do NOT glob all 3515)
+
+Pass ONLY the runtime `.krml` the module reaches, not
+`${fstar-krml}/krml/*.krml` (thousands of files incl. `FStar_List_Tot_Base`,
+which forces the list reachability).  For `Data.Codec.Low` the set is:
+
+```
+FStar_UInt FStar_Int FStar_UInt8 FStar_UInt16 FStar_UInt32
+FStar_Seq_Base FStar_Int_Cast FStar_Pervasives LowStar_Buffer
+FStar_HyperStack FStar_HyperStack_ST
+FStar_Monotonic_Heap FStar_Monotonic_HyperHeap FStar_Monotonic_HyperStack
+```
+
+(discoverable via `grep -oE 'FStar_[A-Za-z0-9_]+|Prims_[A-Za-z0-9_]+' *.c | sort -u`
+on the generated C).  Add `-add-include '"krml/internal/compat.h"'` for the
+Warning 15 math ints and link `${karamel.home}/krmllib/dist/generic/libkrmllib.a`
+to resolve `Prims_op_Division` etc.
+
+### 15.5 `-drop` takes ONE comma-separated name (not space-joined)
+
+`-drop A B C` mis-parse → `Unknown file extension for B`.  Use
+`-drop A,B,C` or one `-drop` per name.  Note `-drop` drops MODULES, not
+functions — it cannot remove a single struct-returning function.

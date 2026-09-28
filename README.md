@@ -11,17 +11,27 @@ code.
 
 ## What's inside
 
-| Skill | Covers |
-|---|---|
-| [`fstar-lang`](fstar-lang/SKILL.md) | Types, effects, operators, syntax, modules, typeclasses, tuples, termination |
-| [`fstar-stdlib`](fstar-stdlib/SKILL.md) | `Seq`, `List`, `Map`, `Set`, `Option`, `Classical`, `Squash` |
-| [`fstar-proofs`](fstar-proofs/SKILL.md) | Lemmas, SMTPat, induction, GADT barriers, Ghost/Stack bridging, proof errors |
-| [`fstar-lowstar`](fstar-lowstar/SKILL.md) | Low\* buffers, KaRaMeL C extraction, `Int.Cast`, `C.Loops` |
-| [`fstar-build`](fstar-build/SKILL.md) | Verification commands, nix derivations, OCaml extraction |
-| [`fstar-docs`](fstar-docs/SKILL.md) | fsdoc comments, module headers, documentation standards |
+Two toolchain eras live side-by-side in this repo:
+
+- **The original six sub-skills are pinned to F\* ≤ 2025.12.15** — the
+  Low\*/KaRaMeL era (`Stack`, `LowStar.Buffer`, `krml`, `FStar.Mul`,
+  `op_Multiply`).
+- **`fstar-2026.09.20` is for F\* ≥ v2026.09.20** — the release that *removed*
+  Low\*/KaRaMeL and shipped Custard + Pulse.
+
+| Skill | Version | Covers |
+|---|---|---|
+| [`fstar-2026.09.20`](fstar-2026.09.20/SKILL.md) | ≥ v2026.09.20 | Custard extractor, Pulse `fn`/`pts_to`, post-KaRaMeL toolchain delta, nix wiring |
+| [`fstar-lang`](fstar-lang/SKILL.md) | ≤ 2025.12.15 | Types, effects, operators, syntax, modules, typeclasses, tuples, termination |
+| [`fstar-stdlib`](fstar-stdlib/SKILL.md) | ≤ 2025.12.15 | `Seq`, `List`, `Map`, `Set`, `Option`, `Classical`, `Squash` |
+| [`fstar-proofs`](fstar-proofs/SKILL.md) | ≤ 2025.12.15 | Lemmas, SMTPat, induction, GADT barriers, Ghost/Stack bridging, proof errors |
+| [`fstar-lowstar`](fstar-lowstar/SKILL.md) | ≤ 2025.12.15 | Low\* buffers, KaRaMeL C extraction, `Int.Cast`, `C.Loops` |
+| [`fstar-build`](fstar-build/SKILL.md) | ≤ 2025.12.15 | Verification commands, nix derivations, OCaml extraction |
+| [`fstar-docs`](fstar-docs/SKILL.md) | both | fsdoc comments, module headers, documentation standards |
 
 Start at [`SKILL.md`](SKILL.md) for a quick-reference index (common errors,
-keyword collisions, effect hierarchy), then open the sub-skill for your task.
+keyword collisions, effect hierarchy), then open the sub-skill for your task
+and toolchain version.
 
 ## Installation
 
