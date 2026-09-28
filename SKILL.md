@@ -15,6 +15,12 @@ with C/OCaml/WASM extraction.  This skill is split into focused sub-skills.
 > shipped Custard + Pulse, read [`fstar-2026.09.20`](fstar-2026.09.20/SKILL.md)
 > instead (C extraction is via Custard's Pulse rules, not `LowStar.Buffer`).
 
+> ⚠️ **There is no reliable F\* auto-formatter in ≥ v2026.09.20.**
+> `--print`, `--print_in_place`, and the `--ide` `format` query all rewrite
+> `(* *)` comments into invalid `//` comments and crash on `#lang-pulse`
+> modules.  Leave `.fst`/`.fsti` hand-formatted (see
+> [fstar-2026.09.20 §7](fstar-2026.09.20/SKILL.md)).
+
 ## Quick Reference
 
 | I need to… | Read |
@@ -55,6 +61,7 @@ with C/OCaml/WASM extraction.  This skill is split into focused sub-skills.
 | `fail`, `try`, `eof` | `fail_`, `try_`, `eof_` | fstar-lang |
 | `type`, `match`, `let`, `in`, `if`, `then`, `else`, `fun`, `function` | Reserved — cannot use | fstar-lang |
 | `module`, `open`, `val`, `rec`, `class`, `instance`, `effect` | Reserved — cannot use | fstar-lang |
+| `label` (in `#lang-pulse` modules only) | Reserved Pulse keyword — can't be a combinator or record field | fstar-2026.09.20 |
 
 ## Module System
 

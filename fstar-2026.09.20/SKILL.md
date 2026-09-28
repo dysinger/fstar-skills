@@ -154,13 +154,84 @@ Pure spec helpers (`varint_encode_pred`, `varint_decode_expected`) reference
 `*.enc` division structure (`v / 16777216`, `(v / 65536) % 256`, …).  Shifts
 would require the old `lemma_word32_shift_bytes` bridge (which is now gone).
 
-### Roundtrip lemmas are *easy* (unexpectedly)
+### Roundtrip lemmas are *easy* (unexpectedly) — **EXCEPT varint**
 
 Because the pure `codec` record's `.enc`/`.dec` are **computable projections**,
 `dec (enc x)` reduces to `Inr (x, n)` and SMT discharges the roundtrip lemma
-automatically — no `lemma_word32_shift_bytes`, no `h_mid` heap threading.  The
-whole `lemma_low_roundtrip_*` family + `lemma_low_encode_decode_match` verify
-with zero manual frame reasoning.
+automatically — no `lemma_word32_shift_bytes`, no `h_mid` heap threading.
+The `token`/`byteval`/`uint8`/`word16*`/`word32*` roundtrip lemmas verify with
+zero manual frame reasoning.  `word32be`/`word32le` are *rlimit-sensitive* but
+terminate (slow, ~90s each at `--z3rlimit 120`).
+
+**`varint` is the exception — it is a NON-TERMINATING SMT query, not "easy".**
+
+`encode_varint`/`decode_varint` are **hand-inlined** (not `varint.enc`/`.dec`
+projections).  `lemma_pulse_roundtrip_varint` composes the two, and the single
+(per-`fn`) SMT query must discharge the 5-way threshold split (`<128`, `<16384`,
+`<2097152`, `<268435456`, else) through the nested `% 128` / `/ 128` byte
+extraction **plus** U32 `U32.add`/`U32.mul` reconstruction.  Z3 spins at 100%
+CPU forever — it does **not** time out cleanly, and raising `--z3rlimit` (tested
+up to 800) does **not** help: the query is undecided by the solver, not merely
+under-budgeted.
+
+### Fix: SMTPat structural lemma for the varint roundtrip
+
+Lift the per-length div/mod decomposition out of the hot query with a pure
+`noextract` `Lemma` carrying an `[SMTPat …]` trigger.  The pure module already
+exports `lemma_varint_2byte_arithmetic` … `lemma_varint_5byte_arithmetic`
+(`Data.Codec.Types`) proving `n = 128*(n/128) + n%128` and the multi-byte
+analogues.  The Pulse module adds:
+
+```fstar
+noextract
+let lemma_varint_roundtrip_smtpat (v: U32.t) (s: Seq.seq U8.t) (i: U32.t)
+  : Lemma
+    (requires varint_encode_pred (U32.v v) s (U32.v i) /\
+              U32.v i + nbytes_of_varint (U32.v v) <= Seq.length s)
+    (ensures varint_decode_expected i (U32.uint_to_t (nbytes_of_varint (U32.v v))) s
+             == DR_Inr ({ n = U32.uint_to_t (nbytes_of_varint (U32.v v)); value = v }))
+    [SMTPat (varint_decode_expected i (U32.uint_to_t (nbytes_of_varint (U32.v v))) s)]
+  =
+  let n = U32.v v in
+  if n < 128 then ()
+  else if n < 16384 then DC.lemma_varint_2byte_arithmetic n
+  else if n < 2097152 then DC.lemma_varint_3byte_arithmetic n
+  else if n < 268435456 then DC.lemma_varint_4byte_arithmetic n
+  else DC.lemma_varint_5byte_arithmetic n
+```
+
+Rules learned (2026.09.20 era):
+
+1. **`--custard_entry_module` roots every top-level def** (reachable **or not**).
+   "Only what's in the execution path extracts" is only true for
+   `--custard_entry`/`--custard_main` (single-root demand).  For library mode
+   (`--custard_entry_module`) the only shield is **`noextract`** — mark every
+   spec-only `Lemma`/helper `noextract` or Custard roots it and Error 368 fires.
+   A pure `Lemma` body is *also* erased (proofs are `unit`-valued), so it is
+   doubly shielded, but `noextract` is what actually stops the rooting.
+2. **A pure `Lemma` does NOT fire inside a Pulse `fn` unless SMTPat-triggered.**
+   Merely defining the lemma (or even `let _ = lemma …` on the *wrong* buffer)
+   leaves the `fn`'s post unproven.  The trigger must match the *exact* term
+   SMT sees: here `varint_decode_expected i m s1` where `m` unifies to
+   `U32.uint_to_t (nbytes_of_varint (U32.v v))` via `encode_varint`'s post
+   `U32.v m == nbytes_of_varint (U32.v v)`.
+3. **The hang is z3 at 100% CPU, not 0%.**  The AGENTS.md "0% CPU / `stopped`"
+   heuristic is the *older* symptom.  This varint query blazes at ~100% CPU for
+   minutes (`ps -o pcpu=,time=` cumulapes 1s CPU per 1s wall) and never returns;
+   it is not a `stopped`/`S` zombie and is not "still working" either — it is
+   undecidable-in-practice.  Treat *both* 0%-stopped and 100%-spinning-anomalously-long
+   as hangs; bisect rather than wait.
+4. **Bisecting a `#lang-pulse` module by truncation is off-by-one prone.**
+   `decode_bytes`'s body-closing `}` is NOT its last `}` — the `match c { … }`
+   and the body `{ … }` are two separate depths, so `head -N` at the wrong `N`
+   leaves `brace depth == 1` and F\* reports a bare `Syntax error` at EOF.  Count
+   `{}`/`()` balance (a 10-line Python scanner that skips `(* … *)`) before each
+   truncation; the green cut points for this module are (encoders+decoders)
+   `head -719`, (+dispatchers) `head -863`, (+through word16le) `head -974`, etc. —
+   **never** `head -862`.
+5. **`varint_decode_expected`/`varint_encode_pred` remain `noextract`** even
+   with the SMTPat lemma added; the lemma itself is `noextract` and references
+   `Seq`/`Prims.int`, so it must not be rooted.
 
 ## 4. Build / nix wiring for the new toolchain
 
@@ -200,6 +271,7 @@ Makefile uses `--no_default_includes`):
 | 134 / 285 | `Pulse` namespace not found | add the four `pulse/*` `--include` paths (or drop `--no_default_includes`) |
 | 180 (`Unexpected operator **`) | `#lang-pulse` not active | load the Pulse lib (`open Pulse`); ensure `#lang-pulse` + Pulse includes |
 | 10 | OCaml codegen batch of many files | one file per `--codegen OCaml` run |
+| — (hang, varint roundtrip) | 100% CPU z3, non-terminating `lemma_pulse_roundtrip_varint` | SMTPat structural lemma (see §3) |
 
 ## 6. Backend matrix (as verified this session)
 
@@ -210,3 +282,91 @@ Makefile uses `--no_default_includes`):
 | `fsharp` | `--codegen FSharp` / `--custard_backend FSharp` | 🟡 `.NET 10`, separate follow-up |
 | `rust` | `--custard_backend KrmlRust` → karamel | ❌ dead upstream |
 | `wasm` | — | ❌ gone (no backend) |
+
+## 7. Formatter, keyword, and proof-engineering gotchas (learned the hard way)
+
+### The F\* formatter is broken upstream — do **not** wire it into treefmt
+
+There is **no reliable F\* auto-formatter** in `v2026.09.20+lsp`.
+
+- `fstar.exe --print` / `--print_in_place` **rewrite `(* … *)` inline comments
+  into `//` line comments**, which F\* cannot parse (Error 168 — `//` is not a
+  comment in F\*, only `(* *)` and `///`).
+- They also **lower-case hex literals** (`0x6Cuy` → `0x6cuy`) and restructure
+  code (collapse `if/else` chains onto one line).
+- `--print`, `--print_in_place`, and the `fstar.exe --ide` `format` query all
+  **crash with "Pattern matching failed" in `FStarC_Parser_ToDocument.ml`** on
+  `#lang-pulse` modules (line 932 of the compiled `fstarc.ml`).  The `--ide`
+  `format` query also *stalls* on larger pure modules.
+
+**Consequence:** leave `.fst`/`.fsti` hand-formatted.  For `treefmt.nix`, format
+only nix (and skip the F\* files, documenting why).  The same applies to
+prettier on prose markdown — it churns legal/changelog docs and hand-written
+prose (double-space sentence gaps, `*`/`F*` emphasis).
+
+### `label` is a **reserved Pulse keyword**
+
+A `#lang-pulse` module cannot use `label` as a combinator name OR a record
+field name (`{ …; label = … }` or `{ r with label = … }`) — the parser rejects
+it with a bare `Syntax error`.  Concretely: a codebase whose pure spec defines
+`label : string -> codec a -> codec a` and a `decode_error` record with a
+`label` field **cannot** mix those pure definitions into a `#lang-pulse` module.
+
+**Fix:** split pure tests/definitions (that use `label`) into a plain module,
+and put only the buffer-based code into a dedicated `#lang-pulse` module.  Do
+not try to `open` the `label`-bearing module from `#lang-pulse`.
+
+### `Pulse.Lib.Array.alloc` / `.free` are deprecated but functional
+
+`A.alloc x n` / `A.free a` carry `[@@deprecated "…unsound; only use for model
+implementations"]` (Warning 288) but **verify green and extract** — they are the
+Pulse analogue of the old Low\* `alloca`+`push_frame`/`pop_frame`.  The
+non-deprecated scoped form is `A.with_local init len (fun arr -> body)`, but its
+signature (universe-polymorphic `ret_t` + `pre`/`post` slprops) is finicky to
+call directly; `alloc`+`free` is the pragmatic choice for a scoped buffer test
+(the deprecation is a warning, not an error, and does not gate the build).
+
+### `assert_norm` does **not** reduce `let`-bound variables
+
+`assert_norm (x == E)` reduces the *term* on each side, but a `let x = … in`
+binding is a free variable whose definition is not substituted into the
+`assert_norm` redex.  So
+
+```fstar
+let expected = string_to_bytes "ABC" in
+assert_norm (expected == seq_of_list [0x41uy; 0x42uy; 0x43uy])  -- FAILS
+```
+
+but the inlined form succeeds:
+
+```fstar
+assert_norm (string_to_bytes "ABC" == seq_of_list [0x41uy; 0x42uy; 0x43uy])
+```
+
+This is because `string_to_bytes` ultimately calls `FStar.String.list_of_string`,
+which only reduces on a *literal* string, and `assert_norm` only normalizes
+closed terms.  When a `Lemma`'s body is failing at rlimit 40 with an
+`assert_norm` on a `let`-bound var, inline the `let`.
+
+### 100% lemma coverage: anchor every public `Lemma`
+
+A "coverage anchor" module (`let _x = f` for every public def) is how you prove
+nothing is dropped.  To audit it:
+
+```bash
+# source defs (strip prefixes, unqualified)
+grep -hoE '^(let|let rec|fn|type|val)[[:space:]]+[a-zA-Z_][a-zA-Z0-9_]*' src/*.fst \
+  | sed -E 's/^[a-z ]+//' | sort -u > /tmp/defs
+# anchored final identifiers (last .segment of each `let _X = RHS`)
+grep -oE '^let _[a-zA-Z0-9_]+ = .*' test/Data.Codec.Test.Integration.fst \
+  | sed -E 's/^let _[a-zA-Z0-9_]+ = //; s/[. ]*\(.*$//; s/[. ]*$//; s/^.*[."'"'"' ]//' \
+  | sort -u > /tmp/anchored
+comm -23 /tmp/defs /tmp/anchored | grep '^lemma_'   # the real gap
+```
+
+Every uncovered `lemma_*` is a genuine coverage hole (the combinator
+"refinement" lemmas — `lemma_product_*`, `lemma_map_*`, `lemma_byte_val_*`,
+`lemma_digits_to_int_*`, `lemma_choice_c1_dominates`, `lemma_one_of_*`,
+`lemma_scan_until_*`, `lemma_take_until_*` — are the common misses).  A bare
+`let _x = f` anchor typechecks without discharging VCs, so it is a pure
+"exists + typechecks" check; that's the point.
