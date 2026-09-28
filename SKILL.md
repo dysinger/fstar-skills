@@ -21,12 +21,13 @@ with C/OCaml/WASM extraction.  This skill is split into focused sub-skills.
 > modules.  Leave `.fst`/`.fsti` hand-formatted (see
 > [fstar-2026.09.20 §7](fstar-2026.09.20/SKILL.md)).
 >
-> ⚠️ **Comment *layout* near the varint arithmetic lemmas is SMT-load-bearing.**
+> ⚠️ **Comment *layout* near the varint arithmetic lemmas is SMT-fragile.**
 > In ≥ v2026.09.20, collapsing the fragmentary `(** *)` one-liners around
-> `nbytes_of_varint`/`lemma_varint_*byte_arithmetic` into single blocks shifts
-> line numbers and re-triggers the non-terminating Pulse varint roundtrip hang
-> (100% CPU z3).  "Comment-only" edits are *not* safe there — see
-> [fstar-2026.09.20 §3 rule 6](fstar-2026.09.20/SKILL.md).
+> `nbytes_of_varint`/`lemma_varint_*byte_arithmetic` into single blocks
+> **correlated with** the non-terminating Pulse varint roundtrip hang (100% CPU
+> z3) in one session — the mechanism is unproven (SMTPat triggers are
+> term-structural), so treat it as "re-verify after any edit there", not an
+> immutable rule.  See [fstar-2026.09.20 §3 rule 6](fstar-2026.09.20/SKILL.md).
 
 ## Quick Reference
 

@@ -244,25 +244,25 @@ Rules learned (2026.09.20 era):
 5. **`varint_decode_expected`/`varint_encode_pred` remain `noextract`** even
    with the SMTPat lemma added; the lemma itself is `noextract` and references
    `Seq`/`Prims.int`, so it must not be rooted.
-6. **Comment line *positions* in the varint region of the pure module are
-   SMT-load-bearing.**  Collapsing the fragmentary `(** … *)` one-liner
-   comments around `nbytes_of_varint` / `lemma_nbytes_of_varint_bound` /
+6. **Comment line *positions* in the varint region are SMT-fragile — observed
+   correlation, mechanism unproven.**  Collapsing the fragmentary `(** … *)`
+   one-liner comments around `nbytes_of_varint` / `lemma_nbytes_of_varint_bound` /
    `lemma_varint_*byte_arithmetic` in `Data.Codec.Types` into single coherent
-   blocks shifts those lemmas' line numbers.  That shift perturbs the
-   `[SMTPat (varint_decode_expected i (U32.uint_to_t (nbytes_of_varint (U32.v v))) s)]`
-   trigger's unification and **deterministically** tips `Data.Codec.Pulse`'s
-   varint roundtrip back into the non-terminating z3 spin (reproduced 4× at
-   the same module, ~100% CPU, `ps` shows no `stopped` state).
+   blocks **correlated with** `Data.Codec.Pulse`'s varint roundtrip becoming a
+   non-terminating z3 spin (reproduced 4× in one session, ~100% CPU, `ps` shows
+   no `stopped` state; reverting the collapse restored GREEN).
 
-   **Do NOT "clean up"/collapse the varint-region comment lines.**  "Comment-only"
-   edits are *not* safe there — F\*'s source positions feed SMT name/pattern
-   generation, so a doc-comment merge that changes line counts is a *semantic*
-   perturbation to the already-fragile varint query.  (The non-varint stacked
-   fsdoc collapses — `nat_of_int`, `u32_of_nat`, `mk_decode_error`,
-   `string_is_ascii`, `u32_of_small_nat` — are safe and landed.)  This is the
-   canonical example of why the Pulse leaf's "varint must stay LAST"
-   declaration-order rule extends to *comment layout adjacent to the varint
-   arithmetic lemmas*.
+   The *mechanism* is not established: the plausible reading is that the
+   edit perturbs the `[SMTPat (varint_decode_expected i (U32.uint_to_t
+   (nbytes_of_varint (U32.v v))) s)]` trigger's unification, but SMTPat triggers
+   are term-structural, not line-number-dependent, so "line numbers → z3 spin"
+   is an **observed correlation, not a verified rule** (cache/source-position
+   perturbation is an alternative explanation).  **Practical rule:** treat any
+   edit near the varint arithmetic lemmas as requiring a re-verify, and don't
+   bulk-collapse that region's comments as a drive-by "cleanup" — but don't
+   enshrine it as an immutable mechanism.  (The non-varint stacked fsdoc
+   collapses — `nat_of_int`, `u32_of_nat`, `mk_decode_error`,
+   `string_is_ascii`, `u32_of_small_nat` — are safe and landed.)
 
 ## 4. Build / nix wiring for the new toolchain
 
