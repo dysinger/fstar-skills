@@ -423,3 +423,68 @@ Every uncovered `lemma_*` is a genuine coverage hole (the combinator
 `lemma_scan_until_*`, `lemma_take_until_*` — are the common misses).  A bare
 `let _x = f` anchor typechecks without discharging VCs, so it is a pure
 "exists + typechecks" check; that's the point.
+
+## 8. v2026.09.20 stdlib + termination deltas (new-session learnings)
+
+### Arithmetic `decreases` clauses are BROKEN — use a bare variable or list subterm
+
+Writing a subtraction in a `decreases` clause fails to parse in v2026.09.20:
+
+```fstar
+let rec go (i: nat) ... : nat (decreases (n - i)) = ...  -- ERROR 208
+  (* Unexpected term: ((decreases (-(n, i)))) *)               -- parsing bug
+```
+
+The `-` between two nats inside `decreases (…)` is parsed as a *(negated)
+tuple*, not subtraction — a v2026.09.20 parser regression.  (`decreases n` and
+`decreases (n + 1 - k)` written *bare* also error the same way.)  The working
+forms, matching `fstar-codec`:
+
+```fstar
+let rec pow2 (n: nat) : Tot int (decreases n) = ...           -- bare nat
+let rec bytes_decode (bs: list byte) ... (decreases bs) = ... -- bare list/subterm
+```
+
+**Rule:** recurse on a *bare* `nat` or on the *subterm of a list/tuple* (F\*'s
+structural order), and return `Tot` — `: Tot (option elem) (decreases ls)`.  Do
+NOT use `Seq.length s - i` or any arithmetic in `decreases` on this toolchain.
+
+### `Seq.fold_left` / `Seq.count` are GONE — convert to a list first
+
+The post-KaRaMeL `FStar.Seq` (`FStar.Seq.Base`/`FStar.Sequence`) no longer
+exports `fold_left`/`fold_right`/`count` directly.  To fold or count over a
+sequence, convert with `Seq.seq_to_list` and use `FStar.List.Tot`:
+
+```fstar
+let count (x: elem) (s: Seq.seq elem) : nat =
+  List.Tot.count x (Seq.seq_to_list s)      -- List.Tot.count : #a:eqtype -> a -> list a -> nat
+```
+
+(`List.Tot.count`/`List.Tot.fold_left`/`List.Tot.filter` are what you use; the
+`Seq` module has `map_seq`, `init`, `slice`, `seq_to_list`, `seq_of_list`, but
+no fold/count.)
+
+### `Tot` does NOT block extraction — *pure types* do
+
+A common fear when porting to C: "if I write `Tot`, can Custard still extract
+C/OCaml/F#?".  Yes — `Tot` is fine (it is the dominant convention in xeno,
+~1000 uses).  What actually gates each backend is the *types in runtime bodies*:
+
+| Module kind | Traits | Extracts to |
+|---|---|---|
+| pure spec (`Seq`/`list`/`nat`/`int`, `Tot`, `Lemma`) | no C repr | **OCaml only** (`--codegen OCaml`) |
+| Pulse leaf (`fn`, `U32.t`/`U8.t`, `A.array`, `Int.Cast`) | C-safe | **C + OCaml + F#** (Custard) |
+
+The Pulse leaf's *spec* (in `ensures`/`noextract` helpers) may mention `Seq`/
+`find_candidate` (erased), but its *runtime body* must stay in `U32.t` + `A.array`
++ Pulse primitives.  This is exactly `fstar-codec`'s split: `Data.Codec.Types`
+/`Data.Codec` → OCaml; `Data.Codec.Pulse` → C/OCaml/F#.
+
+### Local sibling flake deps: `git+file:///abs/path`, not `path:../`
+
+When a new repo consumes a *local sibling* flake (e.g. `fstar-basen` →
+`../fstar-codec`), `path:../sibling` resolves fine as a URL but **fails during
+`nix flake lock`** (`error: '...' is too short to be a valid store path` / pure-
+eval path restriction).  Use `git+file:///absolute/path/to/sibling` instead — it
+locks to the sibling's HEAD commit; switch to the published
+`github:<owner>/<repo>` input when the repo ships.
