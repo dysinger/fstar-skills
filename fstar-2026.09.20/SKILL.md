@@ -324,6 +324,7 @@ Makefile uses `--no_default_includes`):
 | 134 / 285 | `Pulse` namespace not found | add the four `pulse/*` `--include` paths (or drop `--no_default_includes`) |
 | 180 (`Unexpected operator **`) | `#lang-pulse` not active | load the Pulse lib (`open Pulse`); ensure `#lang-pulse` + Pulse includes |
 | 10 | OCaml codegen batch of many files | one file per `--codegen OCaml` run |
+| 66 (implicit `p` only in pre/post) | `FStar.Classical.forall_intro_2/3/4` predicate not inferable | annotate `#a`/`#b`/`#p` explicitly (see §8) |
 | — (hang, varint roundtrip) | 100% CPU z3, non-terminating `lemma_pulse_roundtrip_varint` | SMTPat structural lemma (see §3) |
 
 ## 6. Backend matrix (as verified this session)
@@ -488,3 +489,73 @@ When a new repo consumes a *local sibling* flake (e.g. `fstar-basen` →
 eval path restriction).  Use `git+file:///absolute/path/to/sibling` instead — it
 locks to the sibling's HEAD commit; switch to the published
 `github:<owner>/<repo>` input when the repo ships.
+
+### `FStar.Classical.forall_intro_2` (and `_3`/`_4`) needs explicit implicit args (Error 66)
+
+Under v2026.09.20, a bare `FStar.Classical.forall_intro_2 f` where `f` returns a
+`Lemma` fails to resolve its implicit predicate `#p` (and dependent `#b`):
+
+```fstar
+(* FAILS — Error 66: Failed to resolve implicit argument ?52 of type
+   x: char -> _: list byte -> prop, introduced for Instantiating implicit
+   argument 'p'.  "This implicit argument only occurs in a pre- or
+   postcondition, so it cannot be inferred." *)
+FStar.Classical.forall_intro_2 (fun c rest -> lemma_utf8_decode_prefix c rest)
+```
+
+The single-argument `forall_intro` (`#a #p f`) is usually still inferred, but
+`forall_intro_2` has a *dependent* `#b : a -> Type` followed by
+`#p : x:a -> b x -> prop`, and neither can be recovered from a lambda whose
+`Lemma` body only mentions `p` in its post-condition.  Fix: annotate all three
+implicits explicitly:
+
+```fstar
+FStar.Classical.forall_intro_2
+  #FStar.Char.char
+  #(fun (_: FStar.Char.char) -> list byte)          (* the dependent b *)
+  #(fun (c: FStar.Char.char) (rest: list byte) ->
+       utf8_decode_one (char_to_utf8 c @ rest) == Some (c, rest))
+  (fun c rest -> lemma_utf8_decode_prefix c rest)
+```
+
+That is: write out `#a`, `#b` (as a `fun _ -> T` lambda), and `#p` (the exact
+`ensures` proposition) rather than letting SMT recover them from the lemma
+type.  `forall_intro_3`/`forall_intro_4` are the same shape (one more `#b` per
+quantifier).  The reference repos (`fstar-codec`, `fstar-basen`, `fstar-text`)
+avoid `forall_intro_2` entirely, but if you need it, this is the working form.
+
+### Downstream-repo OCaml extraction: extract the dep's pure spec locally, not the wrapped `codec-ocaml`
+
+A repo that *depends* on `fstar-codec` (e.g. `fstar-basen`, `fstar-text`) and
+wants its own `ocaml` target hits a cross-repo module-resolution trap.  The
+`fstar-codec` flake's `ocaml` package (findlib `codec-ocaml`) **wraps** its
+modules into a `Codec.*` namespace (dune `(wrapped true)` default), so the
+extracted `.ml` files of the downstream repo — which reference the *bare*
+top-level `Data_Codec_Types` / `Data_Codec` — fail with:
+
+```
+File "Data_BaseN_Base32.ml", line 2: Error: Unbound module Data_Codec_Types
+```
+
+Do **not** `(libraries fstar.lib codec-ocaml)` the downstream into the wrapped
+package.  Instead, in the downstream's `ocaml-src` derivation, **extract the
+codec's pure spec (`Data.Codec.Types` + `Data.Codec`) locally** via
+`--codegen OCaml` from the `codec-src` flake input, compile those `Data_Codec_Types.ml`
+/`Data_Codec.ml` into the downstream's own dune library (unwrapped), and drop the
+`codec-ocaml` findlib dep:
+
+```nix
+# in ocaml-src buildPhase, before extracting your own pure modules:
+for m in Data.Codec.Types Data.Codec; do
+  ${fstar-exe} --no_default_includes --include "$ULIB" --include ${codec-src}/src \
+    --cache_checked_modules --cache_dir cache --odir cache ${codec-src}/src/$m.fst || exit 1
+  ${fstar-exe} … --codegen OCaml --odir $out ${codec-src}/src/$m.fst || exit 1
+done
+# dune: (modules …your-modules… Data_Codec_Types Data_Codec Custard)
+#        (libraries fstar.lib)   ← NO codec-ocaml
+```
+
+No `Custard` collision: you only extract the codec *pure* spec, never its
+Pulse leaf (the leaf is what emits `Custard.ml`).  This is the same
+"compile the codec spec locally, unwrapped" shape `fstar-codec` itself uses
+(there `pure-modules` *is* the codec spec).
