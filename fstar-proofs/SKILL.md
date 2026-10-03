@@ -4911,3 +4911,109 @@ monotone) technique is correct and reusable — but ONLY after the underlying da
 is right.  (Also: `assert_norm` on a `let rec` predicate over a literal list
 works fine for 40 elements — test it in a 3-line probe before assuming the
 normalizer is the problem.)
+
+## 76. Extraction-Audit Learnings — value-level coverage anchors + the "dead variant" extraction trap
+
+**Verified (fstar-codec/fstar-uuid/fstar-mime repos, 2026-10-04).** A full
+code-quality/coverage/uniformity audit of the three Round-2 extracted repos.
+Three load-bearing lessons:
+
+### (a) "100% lemma coverage" does NOT mean "100% definition coverage"
+
+The anchor modules anchored every `lemma_*` and every Pulse `fn` — but silently
+SKIPPED value-level definitions.  In `fstar-codec`, the `_co0`(token)…`_co18`(label)
+anchor list had NO entry for `alt`, and `one_of`/`take_until` (which return
+`(enc, dec, wfcv)` **triples**, not `codec` records) plus their helper towers
+(`one_of_enc/dec/mem`, `scan_until_split/content/rest`, `take_until_dec/enc/wfcv/…`)
+were bound only by their *lemmas* (`_ro0`, `_ri0..5`), never as values.  A
+rename/delete of `alt` or `one_of` would leave the build GREEN — exactly what the
+anchor module exists to prevent.  **Audit must enumerate the anchor list against
+the full `grep -nE '^let |^fn '` set, not just `lemma_*`.**  The precise
+enumeration in §9 (`comm` of the `_lemma_` sets) is NECESSARY but NOT SUFFICIENT:
+it catches lemmas only.
+
+### (b) A "dead" `None` variant of a decode-result sum can be LOAD-BEARING for extraction
+
+`Network.MIME.Pulse` had `opt_content_type = OCO_None | OCO_Some of
+(content_type & U32.t)` where `OCO_None` is constructively unreachable
+(`decode_content_type` always returns `OCO_Some`).  "Remove the dead variant"
+looks like a clean refactor — it is NOT.  Making it a **single-constructor** sum
+(or a bare `content_type & U32.t` tuple alias) breaks `nix build .#fsharp` with:
+
+```
+Error 395: Custard: the type FStar.Pervasives.Native.tuple2@content_type_uint32
+is realized by hand-written OCaml and has no F# realization.
+```
+
+The multi-constructor sum gives Custard a discriminated-union shape it can realize;
+collapsing to a tuple exposes the pair to a backend that has no realization for it.
+**Before deleting a "dead" variant, build ALL targets (`.#checked .#native .#ocaml
+.#fsharp`), not just `.#checked` — the pure gate will pass while `.fsharp` breaks.**
+The right resolution is to KEEP the variant and document in fsdoc *why* it must
+stay (loading-bearing extraction shape).  `.#checked` alone is not a sufficient
+correctness gate for a Pulse module; the full deliverable set is.
+
+### (c) Gratuitous `#push-options "--z3rlimit N"` (N >> default) rot with the proof
+
+`lemma_mime_bytes_roundtrip` carried `--z3rlimit 400` (3.3× the module default).
+Probing showed the lemma discharges at the DEFAULT budget (and even at 40).  The
+400 was a fossil from an earlier, harder form of the lemma.  **Always re-probe a
+high rlimit before documenting it as "necessary"; a large scoped rlimit is a
+smell that the proof was once fragile, not evidence it still is.**  (Same class
+as §75's "the admit hides a data bug" — the escape hatch outlives the problem it
+papered over.)
+
+## 76. Mutual-recursion-lemma invariant: `(k + length tail) / N` for consume-N-emit-1 chains
+
+**Verified (fstar-image DataEncoding, 2026-10-03).** `bits_to_bytes` is an 8-way
+`let rec bits_to_bytes_b0 … and b1 … and … b7` chain that consumes one bit per
+step and emits a byte every 8 bits.  Proving `length (bits_to_bytes bs) = length bs / 8`
+looked like a mutual-recursion wall (each `and`-helper has a different arg arity).
+
+**The unlock is a single INVARIANT shared by all 8 helpers**, indexed by `k` =
+the number of bits already collected:
+
+```
+length (bits_to_bytes_b_k bits b0 … b_{k-1}) = (k + length bits) / 8
+```
+
+Prove the 8 helpers as *another* mutually-recursive lemma (`lemma_b0_length …
+and lemma_b1_length … and … lemma_b7_length`), each body one `match` + a call to
+the next (+ for `b7` a call back to `b0_length` on the tail).  The crux `b7` step
+is `1 + length (bits_to_bytes_b0 rest) = (7 + length (b7::rest)) / 8`, which folds
+because `(8 + length rest)/8 = 1 + length rest/8` (floor-distributivity over a
+literal +8).  Scoped `--fuel 2 --ifuel 2` is enough; the terminator clause `| _ -> ()`
+`length = 0` case is vacuous via `(k + …)/8 = 0`.
+
+**General rule:** for a `consume N, emit 1` chain written as N mutually-recursive
+helpers, state ONE lemma with a `k`-parameterized invariant `(k + length tail) / N`
+and prove it as the SAME mutual recursion as the function itself.  Do NOT try to
+prove only the entry point — the invariant is not expressible at the entry helper
+alone.
+
+## 77. `--admit_smt_queries true` ≠ `admit ()` — and it is often removable with a bound lemma
+
+**Verified (fstar-image DataEncoding, 2026-10-03).** Three `#push-options
+"--admit_smt_queries true"` regions wrapped `total_data_codewords`, `encode_bytes`,
+and `string_to_latin1_bytes`.  They are NOT `admit ()`/`assume` — `grep 'admit|assume'`
+does not flag them, and "0-admit" in the project only bans `admit ()`/`assume`.
+But they are still removable in ~minutes each:
+
+- **`total_data_codewords`** — a pure 40×4 `match`; the flag was simply vestigial
+  (no SMT query to admit).  Deleting the `#push`/`#pop` pair is a no-op.
+- **`string_to_latin1_bytes`** — the query is the `FStar.UInt8.uint_to_t` bound
+  `int_of_char c % 256 < 256` (char primitives opaque).  Fix: bind the value and
+  call `FStar.Math.Lemmas.modulo_range_lemma (int_of_char c) 256` *inside the
+  `map` lambda* before `uint_to_t`.  `modulo_range_lemma a b : a:int -> b:pos ->
+  Lemma (a % b >= 0 && a % b < b)` discharges the refinement, no admit.
+- **`encode_bytes`** — the flag admitted queries inherited by the *body*'s SMT
+  obligations; once the sibling lemmas land (`lemma_bits_to_bytes_length`,
+  `lemma_pad_bytes_length`, `lemma_concatMap_byte_to_bits_length`) the flag is
+  removable and everything discharges under plain `--z3rlimit`.
+
+**Lesson:** before reaching for `--admit_smt_queries true` around a definition,
+ask "what single refinement/bound is SMT failing?" — usually it is one
+`uint_to_t`/index bound, and one `FStar.Math.Lemmas` lemma (`modulo_range_lemma`,
+`small_mod`, `lemma_div_mul`) closes it.  A `Lemma` CAN be called inside a `Tot`
+`map` lambda when its only job is to produce the argument's refinement (the
+`ensures` is the bound the lambda then uses).

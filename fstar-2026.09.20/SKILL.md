@@ -732,3 +732,11 @@ audit must include (missed once):
   encode_uuid16`), matching `fstar-basen`'s "mechanically protected against deletion" block.
   (`noextract` spec helpers and `type` decls stay unanchored, as they can't be value-
   anchored and are genuinely used by the `fn` bodies / `--custard_entry` roots.)
+
+  **⚠ That audit catches `lemma_*` only — it does NOT catch value-level
+  definitions.**  A full coverage audit must ALSO diff the full `grep -nE '^let
+  |^fn '` set in `src/` against every `let _x = …` anchor (not just `_lemma_*`).
+  `fstar-codec`'s `_co0.._co18` list silently skipped `alt`, and `one_of`/
+  `take_until` (which return `(enc,dec,wfcv)` triples, not `codec` records) plus
+  their helper towers were lemmas-only.  A value-level combinator's rename/delete
+  would leave the build GREEN.  Anchor the values too — see fstar-proofs §76.
