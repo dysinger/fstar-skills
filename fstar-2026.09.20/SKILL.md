@@ -559,3 +559,64 @@ No `Custard` collision: you only extract the codec *pure* spec, never its
 Pulse leaf (the leaf is what emits `Custard.ml`).  This is the same
 "compile the codec spec locally, unwrapped" shape `fstar-codec` itself uses
 (there `pure-modules` *is* the codec spec).
+
+## 9. Extracted-repo uniformity (verified 2026-10-03, all 7 repos + template)
+
+When a package is extracted to a standalone `fstar-<pkg>` repo, the repo MUST be
+on par with its siblings — not partially uniform, but fully.  Audit **every
+file in every repo** against this checklist (this was the source of two rounds
+of "make it uniform" churn this session):
+
+### Byte-identical across all repos (do not diverge)
+
+- `.gitignore` — identical string every repo (covers `out/`, `result*`, `cache`).
+- `treefmt.nix` — identical (formats **nix only**; `.fst`/`.md` are deliberately
+  excluded because the F\* formatter is broken upstream, see §7).
+- `LICENSE.md` — the AGPL body after the name blurb is byte-identical.
+
+### Uniform-with-per-package-name files
+
+- `LICENSE.md` blurb — the exact pattern is `<name> — a formally verified
+  <desc> written in F\*.` (`codec` uses a comma + "framework" as the origin;
+  every other repo says "a formally verified <desc> library written in F\*.").
+  Do NOT drift to "a verified … that extracts to C/OCaml/F# via Custard" —
+  that was the template's phrasing and leaked into an extracted repo.
+- `CHANGELOG.md` — MUST exist in **every** repo (library **and** `fstar-nix-flake-template`).
+  Keep-a-Changelog + SemVer, with `## [Unreleased]` and `## [0.1.0] — initial
+extraction` (package-accurate `### Added` module lists).  `fstar-codec` is the
+  reference; the other six shipped without one until this session.
+- `flake.nix` `description` — `"<name> — verified <desc>"`; inputs
+  `nixpkgs`/`flake-utils`/`treefmt-nix`/`fstar`(pin `v2026.09.20+lsp`) uniform,
+  plus per-package `fstar-*` dep inputs.
+- `default.nix` — deliverable set is ALWAYS `{ checked; ocaml; native; fsharp; }`;
+  `pname` drops the `fstar-` prefix; codec dep injected as `codec-src`/`codec-checked`.
+- `Makefile`, `AGENTS.md`, `API.md`, `README.md` — header/structure uniform;
+  README/API content is package-specific (architecture, RFC coverage, module tables).
+- Copyright/SPDX header — `Copyright 2026 Department of Code LLC.` +
+  `SPDX-License-Identifier: AGPL-3.0-or-later` on every `.fst`/`.nix` (and `.md` where used).
+
+### Gotchas
+
+- **No scratch dirs in a shipped repo.**  `fstar-codec` carried a `spike/` and
+  `openspec/` dir that no other repo has — a uniformity violation (scratch
+  `.fst`/`.c`/`.checked` and old change proposals).  Flag and confirm before
+  deleting (Mandate 23 backup-before-destroy).
+- **HTTPS remotes + `osxkeychain`.**  Set `origin` to `https://github.com/dysinger/<repo>.git`
+  (not `git@github.com:…`) and `git config --global credential.helper osxkeychain`
+  so pushes don't prompt for SSH passwords.  The first HTTPS push caches a PAT.
+
+### 100%-lemma-coverage audit — the `comm` snippet misfires on real names
+
+The `§7` coverage-audit `sed` regex (`sed -E 's/^.*[."']//'`) mangles identifiers
+like `byte_16_of_indices` / `ov_u32_of_nat` (drops leading `_`-joined segments).
+The precise check: list `lemma_*` from `grep -hoE '^(noextract[[:space:]]+)?let( rec)? lemma_…|^fn lemma_…' src/*.fst`
+and `lemma_*` from `grep -oE '_lemma_[a-zA-Z0-9_]+ = lemma_[a-zA-Z0-9_]+' test/*.Integration.fst`,
+and require the two lists to be **identical**.  Two non-obvious anchors this
+audit must include (missed once):
+
+- **Pulse roundtrip `fn`s** (`lemma_pulse_*_roundtrip`) — they ARE lemmas despite
+  being `fn`s, and need a `let _lemma_… = …` anchor like any `lemma_*`.
+- **Pulse leaf `fn`s** (`encode_*`/`decode_*`) — anchor them too (`let _encode_uuid16 =
+  encode_uuid16`), matching `fstar-basen`'s "mechanically protected against deletion" block.
+  (`noextract` spec helpers and `type` decls stay unanchored, as they can't be value-
+  anchored and are genuinely used by the `fn` bodies / `--custard_entry` roots.)
