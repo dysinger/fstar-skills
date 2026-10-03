@@ -803,6 +803,79 @@ This tells F* to coerce each `group` to `int` (valid because
 `group <: int`).  The forward map should include explicit range
 checks when constructing the record from `int` values.
 
+### Pulse `fn` `ensures` for a fixed-16-byte struct — POINTWISE, not `seq_of_list`
+
+**Verified lesson (fstar-uuid, v2026.09.20 Custard/Pulse).**  The §11 "~12-layer"
+Seq-unwind limit bites TWO ways in a `#lang-pulse` `fn` that reads/writes a fixed
+16-byte record (e.g. an RFC 9562 UUID):
+
+1. **The WRITE direction** — 16 `buf.(jN) <- byteN` produce a 16-deep `Seq.upd`
+   chain in `pts_to`; an `ensures` of the form
+   `Seq.slice s1 off (off+16) \`Seq.equal\` Seq.seq_of_list (encode16_spec u)`
+   does NOT discharge at ANY `--z3rlimit` — it is opacity, not a resource
+   shortfall (the full-build error shows all 16 `_s'NN == Seq.upd _s'MM …` steps
+   in scope yet the final slice equality unproven).
+2. **The READ direction** — `seq_to_list (slice s0 off (off+16))` does not reduce
+   to the 16 elements because `s0` is a symbolic `Seq`.
+
+**The fix that verifies 0-admit: make the `ensures` POINTWISE, with a refined
+`noextract` reconstruction helper.**
+
+```fstar
+(* noextract reconstruction helper: the `off + 15 < Seq.length s` refinement
+   makes each `Seq.index` term well-typed without a separate bounds lemma. *)
+noextract
+let uuid16_of_indices (s: Seq.seq U8.t) (off: nat { off + 15 < Seq.length s }) : uuid16 = {
+  byte0 = Seq.index s (off + 0); ...; byte15 = Seq.index s (off + 15);
+}
+
+fn encode_uuid16 (u: uuid16) (buf: A.array U8.t) (off: U32.t)
+    (#s0: erased (Seq.seq U8.t))
+    requires A.pts_to buf s0 **
+      pure (U32.v off + 16 <= A.length buf /\ U32.v off + 15 < 4294967296)
+    returns w: U32.t
+    ensures
+      (exists* (s1: Seq.seq U8.t).
+        A.pts_to buf s1 **
+        pure (U32.v off + 16 <= A.length buf /\
+              Seq.length s1 == A.length buf /\
+              Seq.index s1 (U32.v off + 0) == u.byte0 /\
+              ... /\ Seq.index s1 (U32.v off + 15) == u.byte15)) **
+      pure (w == 16ul)
+{ ... 16 writes ...; 16ul }
+
+fn decode_uuid16 (buf: A.array U8.t) (off: U32.t)
+    (#s0: erased (Seq.seq U8.t))
+    requires A.pts_to buf s0 **
+      pure (U32.v off + 16 <= A.length buf /\ U32.v off + 15 < 4294967296 /\
+            A.length buf == Seq.length s0)   (* the length fact types the helper below *)
+    returns r: opt_uuid16
+    ensures A.pts_to buf s0 **
+      pure (A.length buf == Seq.length s0 /\
+            U32.v off + 16 <= A.length buf /\
+            r == OU16_Some (uuid16_of_indices s0 (U32.v off), 16ul))
+{ ... 16 reads ... }
+```
+
+Key points:
+- The ENCODE `ensures` lists 16 `Seq.index s1 (off+N) == u.byteN` conjuncts, NOT
+  a `Seq.slice == seq_of_list` equality.  Each conjunct is an independent
+  write-and-read-back that SMT discharges (the Nth `Seq.index` of the `Seq.upd`
+  chain is exactly the Nth write).
+- The DECODE `ensures` states `r == OU16_Some (uuid16_of_indices s0 (U32.v off),
+  16ul)`, and `uuid16_of_indices` carries the `off + 15 < Seq.length s0`
+  REFINEMENT on its argument, so the term is well-typed without a separate
+  bounds lemma.  The `requires` must also carry `A.length buf == Seq.length s0`
+  (which `A.pts_to_len` establishes only inside the body) so the refinement
+  discharges at the `ensures` typechecking point.
+- This is the §18/§11 analogue ("16-element bridge") applied to the PULSE `fn`
+  surface, not to a pure `Lemma`.  The pure `Lemma` induction
+  (`lemma_slice_indices`, §18) is still the tool for pure-spec slice proofs;
+  this pattern is the C-extractable `fn` analogue.
+- The proven 4-byte ceiling (≤4 writes per `fn`, as in `Data.Codec.Pulse`'s
+  `word32be`/`word32le`) has NOT been raised — the pointwise `ensures` is what
+  makes 16 writes tractable, not a higher write count per se.
+
 ---
 
 ## 19. Open-Order Fragility — Export Behavior Across Module Boundaries
