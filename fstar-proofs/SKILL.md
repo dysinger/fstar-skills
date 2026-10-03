@@ -4790,3 +4790,91 @@ bit-identity check.  For the *symbolic* comm/assoc proof, use the position form.
 Also learned: `decreases (8 - k)` on a nat `k` FAILS to prove the termination
 VC `8 - (k+1) << 8 - k` (saturating nat subtraction; SMT can't see `k < 8` from
 the `k = 8` guard).  Count DOWN with `decreases k` and `k - 1` instead.
+
+## 74. GF(2^n) Commutativity Is a Non-Linear-Arithmetic Wall; ReedSolomon Local-Loop Hoisting
+
+**Verified (fstar-image 2026-10-03).** Two results — one landing, one honest blocker.
+
+### (a) gf_mul accumulator linearity PROVES (0-admit)
+
+`lemma_gf_mul_go_linear : gf_mul_go p a b = xor8 p (gf_mul_go 0 a b)` proves by
+structural induction on `b`, *because* the reducing Russian-peasant loop folds
+`a` mod 0x11D each step (`red a = if a >= 128 then xor8 (a*2) 0x11D else a*2`),
+so `a` stays `< 256` THROUGHOUT.  That single fixed bound makes every `xor8`
+bound obligation trivial (`lemma_xor8_bounded`).  This is the prerequisite for
+both commutativity and associativity, and it is the reason the *reducing* loop
+is strictly easier to bound than an *unreducing* carry-less `clmul` (whose `a`
+doubles unboundedly — the §53 "a·2 < 2^15" wall).
+
+### (b) Binary-expansion is the NON-LINEAR wall — commutativity still open
+
+De-risking confirmed the MATH but not the PROOF:
+- `reduce (clmul a b) == gf_mul_go 0 a b` and `gf_mul_go 0 a b == gf_mul_go 0 b a`
+  are both bit-exact over all 256×256 inputs (Python, 0/65536 mismatches).
+- The full `clmul` (position form, `a` fixed) / `reduce` (fold x^8→0x1D) /
+  double-fold `outer`/`inner` scaffolding TYPECHECKS in F*.
+- BUT the load-bearing `expand b j k = b · 2^j` (binary expansion, needs the
+  `b = 2·(b/2) + (b%2)` + `xor16 = + on disjoint bits` chain) does NOT
+  discharge: `b · 2^j` is NON-LINEAR arithmetic, the exact class of the Encode
+  `zlib_wrap` `length (split …)` admit (task 5.4).  `--fuel 16 --ifuel 8`
+  diverges Z3 rather than closing it.  `FStar.Math.Lemmas.lemma_div_mod` gives
+  `b = 2·(b/2)+(b%2)` but the goal `b·2^j` still needs a multiplication step SMT
+  will not take unpredictably.
+
+**Conclusion: commutativity/associativity/inverse of the algorithmic `gf_mul`
+(6.3–6.6) are a genuine NON-LINEAR-ARITHMETIC + FINITE-GROUP blocker, not a
+fuel/bound issue.**  Do not re-grind the same wall; track it and move to
+tractable targets (ReedSolomon length lemmas, DataEncoding, Matrix/Encode).
+
+### (c) Hoist LOCAL loops to top level to prove their length/termination invariants
+
+The ReedSolomon `lemma_rs_ec_length` needed the length invariant of a LOCAL
+`let rec divide`/`subtract` inside `rs_generate_ec`.  A local `let rec` cannot
+be referenced from a top-level lemma.  Fix: hoist to top-level `rs_divide`/
+`rs_subtract` (pass the closed-over `gen`/`k`/`n` as explicit params), then
+prove `rs_subtract` preserves length (induction on `div`), `poly_div_step` drops
+exactly one (via `rs_subtract` + the `_::tl -> tl` match), and `rs_divide` drops
+`k` coefficients (induction on the step count).  Chain with
+`FStar.List.Tot.Properties.append_length` + `lemma_replicate_length`.
+
+Note the measure: the local `subtract` used `decreases (n+1-j)`; the top-level
+`rs_subtract` uses `decreases (length div)` (cleaner, no nat-subtraction VC).
+
+### 6.3 experiment plan — the bound blocker is SOLVED; the bit-XOR lemmas remain
+
+The conclusion above ("do not re-grind") was an *escalation stop*, not a verdict.
+The bound wall (§74(b) "`a·2 < 2^15`") is ALREADY SOLVED by the position-indexed
+`clmul` (§53, `a` fixed, never doubles) — so the remaining work is a FINITE,
+self-contained set of structural bit-arithmetic lemmas.  They are NOT non-linear
+arithmetic; the "`b·2^j` is non-linear" reading over-scoped the actual goal.
+
+The tower, in dependency order, each provable/testable ISOLATED (standalone
+top-level lemma in a scratch module, hard `sleep && kill` guard, `--z3rlimit`):
+
+1. `lemma_nat_xor_double x y n : nat_xor (2x) (2y) n = 2·nat_xor x y (n-1)`
+   (n>0) — body `()`.  The DEFINITIONAL unfold (both LSBs vanish).
+2. `lemma_xor_bit_even a j : nat_xor (pow2 j) (a·pow2(j+1)) 16 = pow2 j + a·pow2(j+1)`
+   (a·pow2(j+1) < 2^16) — induction on j; base uses #1 + `lemma_xor_zero a 15`
+   + `assert_norm (pow2 0 = 1; pow2 1 = 2)`.  This is the **bit-disjoint XOR = +**
+   fact.  If SMT won't rewrite `(2a)%2=0`/`(2a)/2=a`, add
+   `FStar.Math.Lemmas.lemma_mod_mul_distr_l`/`lemma_div_mul` or an explicit
+   `assert (nat_xor 1 (2a) 16 == 1 + 2·nat_xor 0 a 15)` under `--fuel 2 --ifuel 2`.
+3. `lemma_expand_is_b b j k : (b < pow2 k) ==> expand b j k = b·pow2 j` —
+   `expand` is the XOR-fold of `bit_t(b)·2^{j+t}`; body: `lemma_half_lt`, IH on
+   `(b/2, j+1, k-1)`, then case-split `b%2` → #2 (odd) / `lemma_xor_zero` (even).
+   Proving this bit by bit (never the whole `b·2^j` at once) is the linchpin.
+4. `lemma_inner_expand` + `lemma_clmul_eq_outer` + `lemma_outer_sym` (double-fold
+   index swap `(i,j)↔(j,i)` via a fold-swap lemma over `xor16` comm/assoc) →
+   `lemma_clmul_sym`.
+5. `lemma_gf_mul_eq_reduce_clmul` (bridge, induction on b, needs `reduce`/`fold_full`
+   linearity = "reduce is a ring homomorphism"); if it refuses, prove commutativity
+   DIRECTLY on `gf_mul_go` (which keeps `a<256` via `red`, so a symmetric
+   binomial-with-reduction induction may sidestep `clmul`/`reduce` entirely).
+6. Assemble `lemma_gf_mul_comm`; then 6.4 assoc, 6.5 inverse (Fermat `a^255=1`
+   over the order-255 group), 6.6 exp/log (derive `gf_exp` = repeated `gf_mul`
+   power, then 255-fold `assert_norm` or Fermat).
+
+**Fallback if #3 still refuses after #1/#2 land (record WHICH before switching):**
+(a) `FStar.BitVector` `bvxor`/`bvadd` equalities, or (b) exhaustive `assert_norm`
+over the 256×256 table (normalizer, not SMT).  Do NOT re-run the `--fuel 16`
+query that already diverged Z3 once this session; land #1–#3 first and re-measure.
