@@ -739,4 +739,4 @@ audit must include (missed once):
   `fstar-codec`'s `_co0.._co18` list silently skipped `alt`, and `one_of`/
   `take_until` (which return `(enc,dec,wfcv)` triples, not `codec` records) plus
   their helper towers were lemmas-only.  A value-level combinator's rename/delete
-  would leave the build GREEN.  Anchor the values too — see fstar-proofs §76.
+  would leave the build GREEN.  Anchor the values too.
