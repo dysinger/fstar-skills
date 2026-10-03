@@ -4806,25 +4806,35 @@ both commutativity and associativity, and it is the reason the *reducing* loop
 is strictly easier to bound than an *unreducing* carry-less `clmul` (whose `a`
 doubles unboundedly — the §53 "a·2 < 2^15" wall).
 
-### (b) Binary-expansion is the NON-LINEAR wall — commutativity still open
+### (b) Commutativity (6.3) — the doubling-form `b·2^j` naive expansion stalls; position-form + disjoint-XOR is the unlock
 
-De-risking confirmed the MATH but not the PROOF:
+De-risking confirmed the MATH (not yet the PROOF):
 - `reduce (clmul a b) == gf_mul_go 0 a b` and `gf_mul_go 0 a b == gf_mul_go 0 b a`
   are both bit-exact over all 256×256 inputs (Python, 0/65536 mismatches).
-- The full `clmul` (position form, `a` fixed) / `reduce` (fold x^8→0x1D) /
-  double-fold `outer`/`inner` scaffolding TYPECHECKS in F*.
-- BUT the load-bearing `expand b j k = b · 2^j` (binary expansion, needs the
-  `b = 2·(b/2) + (b%2)` + `xor16 = + on disjoint bits` chain) does NOT
-  discharge: `b · 2^j` is NON-LINEAR arithmetic, the exact class of the Encode
-  `zlib_wrap` `length (split …)` admit (task 5.4).  `--fuel 16 --ifuel 8`
-  diverges Z3 rather than closing it.  `FStar.Math.Lemmas.lemma_div_mod` gives
-  `b = 2·(b/2)+(b%2)` but the goal `b·2^j` still needs a multiplication step SMT
-  will not take unpredictably.
+- The full `clmul`/`reduce`/double-fold `outer`/`inner` scaffolding TYPECHECKS.
+- The NAIVE `expand b j k = b · 2^j` (binary expansion with the DOUBLING `clmul`,
+  whose `a` doubles per step) does NOT discharge — `b·2^j` is a non-linear step
+  that `--fuel 16 --ifuel 8` makes Z3 spin on.  That much is a real wall for the
+  DOUBLING form.
 
-**Conclusion: commutativity/associativity/inverse of the algorithmic `gf_mul`
-(6.3–6.6) are a genuine NON-LINEAR-ARITHMETIC + FINITE-GROUP blocker, not a
-fuel/bound issue.**  Do not re-grind the same wall; track it and move to
-tractable targets (ReedSolomon length lemmas, DataEncoding, Matrix/Encode).
+**Refined unlock (see tasks.md Phase 6 PLAN OF EXPERIMENTS — do NOT treat the
+above as a permanent blocker):** use the POSITION-INDEXED `clmul` (bit k of `a`
+contributes `a * pow2 k` with `a` FIXED `< 256` — §53/§74(a)) and split the
+binary-expansion step through `lemma_xor_bit_even`
+(`nat_xor (pow2 j) (a·pow2(j+1)) 16 = pow2 j + a·pow2(j+1)` — the two terms are
+BIT-DISJOINT so XOR equals ADD).  Then `expand b j k = b·2^j` needs only
+`b = 2·(b/2)+(b%2)` (`FStar.Math.Lemmas.lemma_div_mod`) plus the disjoint-add step,
+and the `·2^j` becomes INT-ONLY, SMT-range-safe for `b<256, j<8`.  The earlier
+"non-linear wall" was specific to the doubling/clmul formulation, NOT fundamental.
+
+**Status:** `lemma_gf_mul_go_linear` (accumulator linearity) is PROVEN and committed.
+The remaining 6.3 tower (`lemma_nat_xor_double` → `lemma_xor_bit_even` →
+`lemma_expand_is_b` → `lemma_inner_expand` → `lemma_clmul_eq_outer` →
+`lemma_outer_sym`) is a finite set of STRUCTURAL lemmas, each testable in
+isolation in a scratch module under a hard `{ sleep N && kill }` guard — see the
+Phase 6 plan in tasks.md.  6.4 (assoc) needs the reduce idempotent/linear
+homomorphism; 6.5/6.6 (inverse + exp/log) are FINITE-GROUP (Fermat) and remain
+hard.
 
 ### (c) Hoist LOCAL loops to top level to prove their length/termination invariants
 
@@ -4878,3 +4888,26 @@ top-level lemma in a scratch module, hard `sleep && kill` guard, `--z3rlimit`):
 (a) `FStar.BitVector` `bvxor`/`bvadd` equalities, or (b) exhaustive `assert_norm`
 over the 256×256 table (normalizer, not SMT).  Do NOT re-run the `--fuel 16`
 query that already diverged Z3 once this session; land #1–#3 first and re-measure.
+
+## 75. `admit()` on a finite-table lemma can mask a FALSE statement — audit the data
+
+**Verified (fstar-image DataEncoding, 2026-10-03).** `lemma_capacity_monotonic`
+(`v1 <= v2 ==> total_data_codewords v1 e <= total_data_codewords v2 e`) was
+`admit()`-backed.  Attempting a real proof (refactor `total_data_codewords` into a
+`capacity_column : ecl -> list nat` lookup + per-column `assert_norm` monotonicity
++ pointwise induction) FAILED on the H column — because the lemma is FALSE:
+`total_data_codewords 2 H = 27` while `total_data_codewords 3 H = 26` (27 > 26).
+The H column is non-monotone at versions 2->3, and the whole version-2 row
+(`L=37 M=34 Q=31 H=27`) is mis-transcribed against the authoritative ISO/IEC
+18004 Table 7 (version-2 H should be 16).
+
+**Lesson:** when a finite-table lemma is `admit()`-backed "because it's a big
+match", the admit can hide a genuine DATA bug, not just an SMT limitation.  Before
+proving, verify the lemma against the data: enumerate the table in Python and
+check the claimed property — a single counterexample (here 27>26) turns the task
+from "prove the lemma" into "fix the data".  The `capacity_column` (data) +
+`assert_norm`-per-column + `lemma_mono_indices` (adjacent-nondecreasing => pointwise
+monotone) technique is correct and reusable — but ONLY after the underlying data
+is right.  (Also: `assert_norm` on a `let rec` predicate over a literal list
+works fine for 40 elements — test it in a 3-line probe before assuming the
+normalizer is the problem.)
