@@ -514,6 +514,37 @@ let count (x: elem) (s: Seq.seq elem) : nat =
 `Seq` module has `map_seq`, `init`, `slice`, `seq_to_list`, `seq_of_list`, but
 no fold/count.)
 
+### `Seq.seq_to_list` head does NOT relate to `Seq.index 0` — bridge explicitly
+
+`Seq.seq_to_list s`'s head is **not** SMT-equal to `Seq.index s 0` — a bare
+`Lemma` with `= ()` does NOT discharge it (both are opaque projections).  A
+list-level run scanner whose `rest_cond` framing is sequence-level
+(`Seq.length r = 0 \/ not (f (Seq.index r 0))`) needs this explicit bridge (via
+the transparent stdlib uncons laws):
+
+```fstar
+(** Lemma: the head of [Seq.seq_to_list s] is [Seq.index s 0] (non-empty). *)
+let lemma_seq_to_list_head_is_index (s: byte_seq) : Lemma
+  (requires Seq.length s > 0)
+  (ensures (match Seq.seq_to_list s with
+            | [] -> False
+            | hd :: _ -> hd == Seq.index s 0))
+  =
+  let hd = Seq.index s 0 in
+  let tl = Seq.slice s 1 (Seq.length s) in
+  FStar.Seq.Properties.lemma_split s 1;       (* s == cons (index s 0) (slice s 1 len) *)
+  FStar.Seq.Base.lemma_seq_to_list_cons hd tl; (* seq_to_list (cons h tl) == h :: seq_to_list tl *)
+  ()
+```
+
+This is the same class as `lemma_seq_to_list_of_list_append` (the §11 bridge):
+`seq_to_list` only unfolds through `FStar.Seq.Base.lemma_seq_to_list_cons`/
+`FStar.Seq.Properties.append_cons`/`lemma_split`, never by SMT alone.  The
+`satisfy_many0`/`satisfy_many1` generic roundtrip (fstar-codec, 0-admit) chains
+`lemma_seq_to_list_of_list_append xs r` (prefix) with
+`lemma_seq_to_list_head_is_index r` (suffix head) so the symbolic-`f` framing
+reaches the list-level scanner `satisfy_run_scan`.
+
 ### `Tot` does NOT block extraction — *pure types* do
 
 A common fear when porting to C: "if I write `Tot`, can Custard still extract
