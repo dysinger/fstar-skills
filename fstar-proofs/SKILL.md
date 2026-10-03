@@ -4953,6 +4953,31 @@ The right resolution is to KEEP the variant and document in fsdoc *why* it must
 stay (loading-bearing extraction shape).  `.#checked` alone is not a sufficient
 correctness gate for a Pulse module; the full deliverable set is.
 
+### (d) Generated-constant naming: document the identifier-escaping convention in fsdoc
+
+`fstar-mime` auto-generates 2280 registry constants from IANA names.  The IANA
+subtype string `amr-wb+` → the F* identifier `audio_amr_wb_plus_` (trailing `+`
+becomes a trailing `_plus_`) and a leading digit `1d-interleaved...` →
+`application__1d_interleaved...`.  Both look like bugs to a reader (`_plus_` with
+no suffix, a `__` that is BOTH the `type`/`subtype` separator AND the
+leading-digit escape prefix).  **The fix is NOT to rename 222 constants
+(churn/risk for a cosmetic nit) — it is to document the escaping table in the
+module header (`@section Identifier escaping`)** so the mapping is
+self-explanatory.  Reviewer flags a naming smell; closure is a doc, not a rename.
+
+### (e) A bare `let _ = f` coverage anchor generates NO VC — the scoped admit is inert
+
+Coverage-anchor modules (`Network.MIME.Test.Integration`, `Data.Codec.Test.
+Integration`) wrap their `let _f = f` bindings in `#push-options
+"--admit_smt_queries true"`.  This looks alarming but is INERT: `let _ = f`
+simply references a value, generating zero verification conditions (no roundtrip
+or logical claim is being re-proved).  The correct closure is a header comment
+stating precisely that — "every binding is a bare value reference; individual
+lemmas are proven 0-admit in their source modules" — NOT removing the scoped
+admit (which would be churn) and NOT inventing per-anchor proofs (which would
+duplicate the real lemmas).  This is the §78 distinction applied to the anchor
+module: the admit is an escape hatch for the *anchor*, not the *lemma*.
+
 ### (c) Gratuitous `#push-options "--z3rlimit N"` (N >> default) rot with the proof
 
 `lemma_mime_bytes_roundtrip` carried `--z3rlimit 400` (3.3× the module default).
