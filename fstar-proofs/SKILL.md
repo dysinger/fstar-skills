@@ -4646,3 +4646,113 @@ through both (even where one ignores it — Sub ignores `prev`, but passing `[]`
 on one side and `prev` on the other makes SMT see two different terms; thread
 `prev` through both so the `lemma_filter_roundtrip` composition reduces
 without a `prev`-irrelevance lemma).
+
+## 73. GF(2^n) Field Laws — Algorithmic Multiply + Fuel Unfold + Finite-Group Reality
+
+**Verified (fstar-image `Data.Image.QRCode.GF256`, foundation 0-admit; hard laws
+in progress)**: proving the GF(2^8) field laws (commutativity/associativity/
+distributivity/multiplicative-inverse) for QR Reed-Solomon is a *finite-field
+formalization*, distinct from every prior codec/scan/roundtrip proof.  The
+mechanics below are the de-risked unlock; the laws themselves are a substantial
+induction tower (see the tasks.md "hard half" notes for the full plan).
+
+### The unlock: `--fuel`/`--ifuel` makes SMT unfold recursive arithmetic
+
+SMT does **not** unfold a recursive `let rec gf_mul_go`/`nat_xor`/`clmul` by
+default — even a *bounded* single-step case (`gf_mul_go 0 a 1`).  `--fuel 2
+--ifuel 1` (or higher) does:
+
+```fstar
+#push-options "--fuel 2 --ifuel 1"
+let lemma_gf_mul_go_one (a: nat) : Lemma (requires a < 256) (ensures gf_mul_go 0 a 1 = a) = ()
+#pop-options
+```
+
+**Scope it per-lemma, never global.**  A *global* `--fuel 4 --ifuel 2` at the
+top of the module broke already-proven bound lemmas (`lemma_xor_bounded` —
+the extra fuel made Z3 spin off into divergent paths).  Wrap each hard lemma in
+its own `#push-options "--fuel N --ifuel N"` / `#pop-options` pair.
+
+### Top-level `let rec`, never a local closure
+
+`assert_norm` and SMT **cannot** reduce a `let rec go = … in` *local* closure
+(Error 19 / "Failed to prove: f 0x53 0xCA = …").  Hoist every recursive helper
+to a top-level `let rec`.  After the hoist, `assert_norm (gf_mul_go 0 0x53 0xCA
+= 0x8F)` discharges (the normalizer, NOT SMT — use `assert_norm`, not bare
+`assert`).
+
+### Refined params on a recursive fn DESTROY fuel-unfold
+
+`let rec gf_mul_go (p: nat{p<256}) (a: nat{a<256}) …` forces an inline
+`lemma_xor8_bounded p a` call at every recursive call site (to discharge the
+`p' < 256` refinement), and those inline Ghost calls make the definition opaque
+to `--fuel` unfold — the hard laws then refuse to reduce.  **Prefer a plain-`nat`
+recursive body** and prove the bound as a SEPARATE top-level lemma
+(`lemma_gf_mul_go_bounded`), applied once at the `gf_mul` wrapper:
+
+```fstar
+let rec gf_mul_go (p a b: nat) : Tot nat (decreases b) = …   (* plain *)
+let rec lemma_gf_mul_go_bounded (p a b: nat) : Lemma
+  (requires p < 256 /\ a < 256) (ensures gf_mul_go p a b < 256) = …
+let gf_mul (a b: gf256) : gf256 =
+  lemma_gf_mul_go_bounded 0 (U8.v a) (U8.v b);                 (* Ghost, erased *)
+  U8.uint_to_t (gf_mul_go 0 (U8.v a) (U8.v b))
+```
+
+The trade-off: that one-time ghost call inside `gf_mul` then makes
+`assert_norm (gf_mul …)` fail (Error 187 / can't normalize through the ghost
+step).  So **state known-answer lemmas at the `gf_mul_go` nat level, not the
+`gf_mul` byte level** — the field laws are all proven on the nat model anyway.
+
+### `assert_norm` in a `Lemma` body: `Lemma (ensures …)` form, no wrapper
+
+- `let l : Lemma (P) = assert_norm P` → **Error 187** "Effect Lemma used at an
+  unexpected position".  Use `let l () : Lemma (ensures P) = assert_norm P`
+  (the `()`-unit + explicit `ensures` form, exactly as `Data.Image.PNG.CRC`).
+- `assert_norm` **cannot normalize through `U8.uint_to_t`** (the `Mk`-constructor
+  `U8.t` is opaque).  Bridge `v`-level facts with `U8.v_inj` only *after* the
+  `assert_norm` on the nat term; or just keep the lemma nat-level.
+
+### The add laws are TRIVIAL, contrary to the original code's comment
+
+The original had `admit () (* SMT cannot reason about UInt8.logxor *)` on all
+four add laws.  Wrong — `FStar.UInt` ships `logxor_commutative`/`_associative`/
+`_self`/`_lemma_1` (`#n a b`), and `U8.t` is bridged via `v_inj`:
+
+```fstar
+let lemma_gf_add_comm (a b: gf256) : Lemma (gf_add a b = gf_add b a) =
+  FStar.UInt.logxor_commutative #8 (U8.v a) (U8.v b); U8.v_inj (gf_add a b) (gf_add b a)
+```
+
+### The multiplicative-inverse law is a FINITE-GROUP theorem, not a ring law
+
+`lemma_gf_mul_inverse (a ≠ 0) : a · gf_exp (255 − gf_log a) = 1` depends on
+`gf_log` (discrete logarithm), which has **no algorithmic shift-XOR form** — it
+is a 256-entry table.  So:
+- `gf_mul`/`gf_add` → algorithmic, ring laws provable (comm/assoc/distrib).
+- `gf_exp`/`gf_log` → stay tables; the inverse + exp/log-consistency lemmas are
+  proven via the finite group GF(256)* of order 255 (Fermat: `a^255 = 1` for
+  `a ≠ 0`, `FStar.Math.Fermat`), or by exhaustive `assert_norm` over the 255
+  nonzero elements.  Re-deriving the antilog table from a *proven* repeated-`gf_mul`
+  power is the cleanest bridge (avoids unprovable table-lookup equalities).
+
+### GF(2^8) carry-less model — the right target, not bit-twiddling
+
+Model elements as `nat` (bit i = coeff of x^i).  `add` = structural `nat_xor`
+(comm/self/identity/assoc prove by induction on bit-width — trivial); `mul` =
+carry-less product `clmul` then `reduce` (fold bits ≥ 8 via `x^8 ≡ 0x1D`).
+Commutativity/associativity/distributivity reduce to `clmul` being a symmetric,
+associative, XOR-linear map + `reduce` being a ring homomorphism.  The
+commutativity induction starts from `lemma_clmul_go_linear` (`clmul_go acc a b
+= xor acc (clmul_go 0 a b)`), which needs `xor`→`<2^15` and `a·2<2^15` bound
+lemmas at every step — that bound-tracking is the real cost, not the algebra.
+
+### Verify the rewrite is bit-identical BEFORE proving
+
+`assert_norm` reduces the algorithmic `gf_mul` on concrete bytes, so a quick
+Python exhaustive check that the new `gf_mul` equals the old log/antilog table
+`gf_mul` over all 256×256 inputs (0 mismatches) is the ground-truth guard that
+the Reed-Solomon output is unchanged.  Run it first; it cost nothing and caught
+an `alpha_pow` known-answer bug (`0x10 · 0x02 = 0x20`, not `0x1D` — the `x^8→0x1D`
+reduction only fires at bit 7, so `alpha^8` is `0x02` multiplied eight times,
+not `0x10` twice).
