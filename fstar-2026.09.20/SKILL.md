@@ -545,6 +545,38 @@ This is the same class as `lemma_seq_to_list_of_list_append` (the §11 bridge):
 `lemma_seq_to_list_head_is_index r` (suffix head) so the symbolic-`f` framing
 reaches the list-level scanner `satisfy_run_scan`.
 
+### Reordering a proof-heavy module — extract units by balanced `#push`/`#pop`
+
+To reorganize a large `.fst` (e.g. `Data.Codec.Types`, 163 defs, 80 lemmas)
+into "layers, each sorted", do **NOT** write one line-based splitter that walks
+backward over `(** *)`/`(* *)` comments to find each def's verbatim block.  A
+handful of defs have *inconsistent* doc-comment placement (a duplicated
+`(** pow2 *)` + `(** pow2. *)`, a `(* *)` block and `#push-options` sandwiched
+between a section header and its def, `codec` as a `type` wrapped in its own
+`#push`/`#pop`), so backward-comment-walking silently mis-splits units and
+gives a `#push`/`#pop` imbalance (which corrupts the module).
+
+The reliable unit boundary is the **balanced `#push-options`/`#pop-options`
+pairing** — a def's block ends at its `#pop-options`, full stop (66 balanced
+pairs in `Data.Codec.Types`).  Then reorder **incrementally, layer by layer**:
+
+1. Extract all units; assert 0 `#push`/`#pop` imbalance per unit, 0 overlap, 0 gap.
+2. Classify each def into a semantic layer (core types → helpers → proof
+   lemmas → combinators → expansion lemmas).
+3. Sort **within** each layer by topological+alphabetical order — NOT pure
+   alphabetical, because F\* requires definition-before-use and lemmas form a
+   DAG (a single alphabetical lemma block is NOT feasible: `Data.Codec.Types`
+   has 23 lemma→lemma edges + edges to non-lemma helpers).
+4. Re-verify `make check` (0-admit) after **every** move.  F\* is the ordering
+   oracle: an out-of-order reference surfaces as "not found in scope" (Error
+   72/241) and is fixed by moving *that one* dependency earlier — don't re-sort
+   the whole layer.
+
+Distinguish **proof lemmas** (used *by* combinators; `lemma_bytes_decode_*`,
+`lemma_varint_*`, `lemma_seq_*`, …) from **expansion lemmas** (`lemma_{map_,
+product,byte_val,digits_to_int}_*_eq`) which document a combinator's `.wfcv`/
+`.rest_cond`/`.enc`/`.dec` and therefore must come *after* that combinator.
+
 ### `Tot` does NOT block extraction — *pure types* do
 
 A common fear when porting to C: "if I write `Tot`, can Custard still extract
