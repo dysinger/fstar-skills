@@ -4434,3 +4434,107 @@ The `decreases bs` measure is unchanged (the scan still consumes one byte per
 step; the quote state is just an extra carried value).  `is_doctype_quote` must
 move BEFORE its first use (definition-before-use — it was previously defined
 AFTER `scan_doctype_go`).
+
+## 70. Table-Driven Known-Answer Lemmas — Replace the Lookup Table with the Algorithm
+
+**Verified lesson (fstar-image, CRC-32 and GF(256))**: a codec/hash whose
+correctness is pinned by "known-answer" lemmas (`crc32_of_bytes
+"123456789" == 0xCBF43926`, `gf_exp (gf_log a) == a`) CANNOT be proven while
+the computation is defined over a **256/512-entry opaque lookup table**: SMT
+never reduces `List.Tot.nth` over a 256-element list, so `assert_norm` on the
+known-answer equality fails and the lemmas end up `admit ()`.  Replacing the
+table with the **equivalent algorithmic computation** makes the known-answer
+lemma reduce under `assert_norm` and discharges it 0-admit.
+
+### The pattern (CRC-32, verified)
+
+`crc32_update` over a 256-entry reflected table did not reduce.  The
+table-free bitwise form does:
+
+```fstar
+let crc_step (c: UInt32.t) : UInt32.t =
+  if (c &^ uint_to_t 1) = uint_to_t 0
+  then c >>^ uint_to_t 1
+  else (c >>^ uint_to_t 1) ^^ uint_to_t 0xEDB88320   (* reflected poly *)
+
+let rec crc_byte_fold (c: UInt32.t) (n: nat) : Tot UInt32.t (decreases n) =
+  if n = 0 then c else crc_byte_fold (crc_step c) (n - 1)
+
+let crc32_update (crc: UInt32.t) (b: byte) : UInt32.t =
+  crc_byte_fold (crc ^^ uint_to_t (U8.v b)) 8
+
+(* then: lemma_crc32_check_value () : Lemma (crc32_of_bytes "...9" == 0xCBF43926)
+   = assert_norm (…)  — DISCHARGES *)
+```
+
+The `assert_norm` reduces 8 shift-XOR steps per byte (a finite, closed loop),
+which the normalizer handles; a 256-entry `List.Tot.nth` does not.
+
+### When it applies
+
+- Any "pre-computed table + known-answer lemma" codec: CRC/Adler (tables),
+  GF(256) log/antilog multiplication (tables), base-N lookup tables, AES S-boxes.
+- The table is a runtime OPTIMIZATION, not part of the spec; the bitwise/polynomial
+  form is the spec, and it is what the proof should carry.  Keep `gf_add`/XOR
+  as the algorithmic primitive (`UInt8.logxor` + `FStar.UInt.logxor_*` lemmas).
+- The runtime cost is unchanged for GF(256) (8 iterations of shift-XOR == the
+  O(1) the table bought) and CRC (8*n bit ops vs n table lookups — acceptable).
+
+### The GF(2^8) field axioms (what Phase 6 needs)
+
+`gf_add = UInt8.logxor` — its laws are FREE via `FStar.UInt`:
+`logxor_lemma_1` (identity), `logxor_self` (self-inverse),
+`logxor_commutative`, `logxor_associative`.  `gf_mul a b` = shift-XOR mod
+0x11D; commutativity/associativity/distributivity/inverse follow by induction
+on the 8 multiplier bits + the `logxor` laws.  This replaces the 14 `admit ()`
+"field axiom" sites in `Data.Image.QRCode.GF256` with real proofs.
+
+## 71. Non-Linear Arithmetic + Recursive Unfold — the `length (split …)` Wall
+
+**Verified blocker (fstar-image, `Data.Image.PNG.Encode`)**: proving
+`length (filter_all_scanlines (split_scanlines data sl)) == height * (sl + 1)`
+from `valid_image` (`length data = width * height * bpp`) and `sl = width * bpp`
+does NOT discharge, no matter the lemma scaffolding.  SMT must chain THREE
+non-linear/unfold facts that it will not combine:
+
+1. `length (take_bytes sl data) = sl` needs `length data >= sl`, i.e.
+   `h * sl >= sl` (non-linear; SMT CAN prove this ONE fact in isolation, §13's
+   "else gives ~(h=0)" gotcha means you must `assert (h >= 1)` first).
+2. `length rest = length data - sl = (h-1) * sl` needs
+   `h * sl - sl = (h - 1) * sl`, i.e. `FStar.Math.Lemmas.distributivity_sub_right sl h 1`
+   AND multiplication commutativity `sl * (h-1) = (h-1) * sl`.
+3. The recursion's TERMINATION: `let (line, rest) = take_bytes sl data` must
+   prove `rest << data`, which needs `length line > 0` (`= sl > 0`) plus
+   `length line + length rest = length data` chained through the subtraction —
+   the SAME non-linear `length data - sl < length data` step.
+
+Even with every `FStar.Math.Lemmas` call and `assert` spelled out, the
+`Lemma`'s postcondition (`length (filter_rows h sl data) = length data + h`)
+does not discharge — the recursive `filter_rows`/`split_scanlines` self-unfold
+across `if`/`match`/`let (row, rest) = take_bytes …` is opaque (§2), and the
+length arithmetic is non-linear.  Raising `--z3rlimit` does not help (it is
+not under-resourced; near-zero rlimit consumed).
+
+### The honest resolution
+
+- **Do NOT burn a session on this** — it is a known §2 non-linear + §2
+  recursive-unfold compound barrier, not a proof gap.
+- The types are still fully checked (`requires`/`ensures`); only the SMT query
+  is admitted.  Use `--admit_smt_queries true` on the SINGLE function with an
+  explicit comment naming the wall (fstar-proofs §34: prefer admit_smt_queries
+  over a bare `admit()` body).
+- The cleaner alternative (worth it only if the length fact is load-bearing):
+  restructure so the length is DEFINITIONAL, e.g. make the filter return a
+  `(list byte & nat)` carrying the emitted-filter-byte count, or index the
+  recursion on the row count with `take_bytes` returning a length-REFINED pair
+  (`(row: list byte{length row = sl}) & list byte`).  Then the row count and
+  per-row length are type-carried, not SMT-derived.
+
+### Also relevant (the ascii-codec lossy roundtrip)
+
+A "roundtrip" lemma must match the ACTUAL semantics: `Data.Image`'s ascii codec
+thresholds gray pixels (dark `<128` → `0x00`, light `>=128` → `0xFF`), so
+`decode_ascii (encode_ascii img) == Some img` is FALSE for e.g. pixel `0x50`.
+The correct lemma is a THRESHOLD roundtrip (`map threshold img.data`), not
+byte-exact.  Audit the actual forward/back maps before writing `dec (enc v) == v`;
+a lossy map silently makes the naive roundtrip unprovable (and false).
