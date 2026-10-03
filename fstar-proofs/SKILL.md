@@ -3695,6 +3695,47 @@ unless/until the 2D induction is cracked.
 
 ---
 
+---
+
+## 60b. Predicate Run (`satisfy_many1`) IS a generic `codec` — unlike delimiter content (§60)
+
+**Verified lesson (planned `satisfy-many-run-combinator`, fstar-codec).**  The
+§60 2D wall is specific to **delimiter**-terminated content (a multi-byte
+`delim` prefix must be excluded from the whole content).  A **single-byte
+predicate run** — "consume while `f : byte -> bool` holds" — is 1D and does NOT
+hit that wall.  Its framing is a *head-byte predicate rejection*:
+
+```fstar
+rest_cond xs r = (Seq.length r = 0 \/ not (f (Seq.index r 0)))
+```
+
+and its roundtrip `dec (seq_of_list xs ++ r) == Inr (xs, length xs)` (for
+`for_all f xs` + the framing) is provable by the §11 list induction — the exact
+shape `lemma_digits_process_list` already proves for the *concrete* `is_digit`.
+
+**The two rules that decide whether the generic roundtrip ships as a `codec` field:**
+
+1. **Predicate run (1D) → ship generic.**  Generalize `is_digit → f: byte -> bool`;
+   the induction is unchanged (single cons step per byte, stop at first
+   `not (f b)`).  This is `satisfy_many0`/`satisfy_many1`.
+2. **Delimiter content (2D) → per-instantiation only (§60).**
+   `no_delim delim (b::tl)` needs a prefix-length argument; a symbolic `delim`
+   does not unfold in lockstep with the scan.
+
+**Placement rule (the §11-correction, sharpened):** the roundtrip MUST be
+written **inside `Data.Codec.Types`**, where `lemma_seq_to_list_of_list_append`
+(§11 REVISED) is *transparent*.  A consumer-side attempt (e.g. a `custom`
+`token_codec : codec (list byte)` built from `fstar-mime`) CANNOT discharge the
+`Seq.seq_to_list (seq_of_list l ++ r)` rewrite — the bridge is opaque across
+module boundaries (the precise blocker the bespoke mime attempt hit).  This is
+the same reason `count`/`bytes` keep their roundtrip proofs in the defining
+module (#60 checklist #2 applied to a new combinator).
+
+Do NOT hand-roll a per-package run scanner to work around the absence of this
+primitive — that is a Mandate-22 violation.  Add/extend the codec.
+
+---
+
 ## 61. Variable-Width UTF-8 String Codec — `seq_to_list`-at-Boundary + `nat`-Fuel Scan
 
 **Verified lesson**: Building the first
