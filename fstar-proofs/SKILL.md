@@ -4538,3 +4538,70 @@ thresholds gray pixels (dark `<128` → `0x00`, light `>=128` → `0xFF`), so
 The correct lemma is a THRESHOLD roundtrip (`map threshold img.data`), not
 byte-exact.  Audit the actual forward/back maps before writing `dec (enc v) == v`;
 a lossy map silently makes the naive roundtrip unprovable (and false).
+
+## 72. Look-Back Byte Transforms (PNG filters) — Forward Accumulator + `take`/`drop` Invariant
+
+**Verified (fstar-image `Data.Image.PNG.Filter`, 0-admit)**: the PNG
+Sub/Up/Average/Paeth filters are *look-back* transforms — output byte `i`
+depends on input byte `i - bpp` (and the prior row).  Their roundtrip
+`reconstruct (filter row) == row` proved cleanly via ALL FOUR of:
+
+1. **Forward-accumulator reconstruct** (NOT a reversed accumulator).  Build the
+   output left-to-right with `acc @ [..]`; the left neighbour is then a plain
+   forward index `nth_byte acc (i - bpp)`.  A *reversed* accumulator forces
+   `nth_byte acc (bpp - 1)` (the reverse-index mapping `rev (take i) [bpp-1]
+   == row[i-bpp]`), which SMT will not chain — it is the same opaque-`rev_acc`
+   wall as §11's `Seq` barrier, but at the list level.
+
+2. **The `take row i` invariant.**  Prove `reconstruct … (take row i) … == row`
+   by induction on index `i`: the accumulator is *exactly* `take row i`
+   (the reconstructed prefix == the original prefix).  `lemma_nth_take`
+   (transparent, structural) then gives `nth_byte (take row i) k == nth_byte row k`
+   for the predictor agreement, and `lemma_take_cons` (`take l (n+1) == take l n @ [nth_byte l n]`)
+   advances the invariant.
+
+3. **The wrapping-arithmetic identity.**  Every filter byte is
+   `sub_mod x p` and every reconstruct byte `add_mod f p` for the SAME predictor
+   `p` — so the roundtrip is *just* `add_mod (sub_mod x p) p == x`, independent
+   of `p`.  On the new toolchain this is `FStar.UInt.lemma_add_sub_cancel #8 (v x) (v p)`
+   + `v_inj` (see fstar-2026.09.20 §8 "Wrapping byte arithmetic roundtrip").
+   The predictor function (`avg_predictor`/`paeth_predictor`) needs NO arithmetic
+   lemma — its inputs match by #2, so its output matches by congruence.
+
+4. **List-level `take`/`drop` defined locally.**  `FStar.List.Tot` has neither
+   (they are `FStar.Sequence` only) — define transparent 5-line
+   `take`/`drop`, plus `lemma_drop_all` (`drop l (length l) == []`) and
+   `lemma_take_all` (`take l (length l) == l`) for the base case, and
+   `lemma_drop_cons` (`drop l n == nth_byte l n :: drop l (n+1)`) for the step.
+
+The proven per-filter lemmas are `lemma_sub_rt`/`lemma_up_rt`/`lemma_average_rt`/
+`lemma_paeth_rt`, each:
+
+```fstar
+let rec lemma_sub_rt (row prev: list byte) (bpp: nat{bpp>0}) (i: nat)
+  : Lemma (requires length row = length prev /\ i <= length row)
+          (ensures reconstruct_sub_aux (filter_sub_aux row (drop row i) prev bpp i)
+                      prev bpp (take row i) i == row)
+          (decreases (length row - i))
+  = if i = length row then (lemma_drop_all row; lemma_take_all row)
+    else begin
+      let x = nth_byte row i in
+      lemma_drop_cons row i;
+      if i >= bpp then lemma_nth_take row i (i - bpp);   (* predictor agreement *)
+      lemma_wrap x (if i >= bpp then nth_byte row (i-bpp) else 0x00uy); (* (x-p)+p==x *)
+      lemma_take_cons row i;
+      lemma_sub_rt row prev bpp (i + 1)                  (* IH *)
+    end
+```
+
+`FilterUp` is the degenerate case (predictor = `nth_byte prev i`, no look-back
+into the row, no `lemma_nth_take` needed).  This is the §47 path (a) analogue for
+byte transforms — genuinely STRUCTURAL induction works because the look-back is
+`bpp` steps, not a recursive *type*; no higher-order `Lemma` parameter, no
+"incomplete quantifiers".
+
+**Gotcha:** the per-filter filter/reconstruct must thread the SAME `prev`
+through both (even where one ignores it — Sub ignores `prev`, but passing `[]`
+on one side and `prev` on the other makes SMT see two different terms; thread
+`prev` through both so the `lemma_filter_roundtrip` composition reduces
+without a `prev`-irrelevance lemma).

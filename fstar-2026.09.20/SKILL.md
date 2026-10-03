@@ -450,6 +450,55 @@ let rec bytes_decode (bs: list byte) ... (decreases bs) = ... -- bare list/subte
 structural order), and return `Tot` — `: Tot (option elem) (decreases ls)`.  Do
 NOT use `Seq.length s - i` or any arithmetic in `decreases` on this toolchain.
 
+**REFINEMENT (verified 2026-10-03, `Data.Image.PNG.Filter`):** the parser
+regression fires on a *bare-variable* `n - i` only.  `decreases (length l - i)`
+where `length l` is a **function application** (`List.Tot.length l`, not a bare
+`n`) parses and verifies fine — used 4× in `lemma_sub_rt`/`lemma_up_rt`/
+`lemma_average_rt`/`lemma_paeth_rt` (each `(decreases (length row - i))`,
+recursing on `i+1` guarded by `i < length row`).  So: bare `n - i` = ERROR 208;
+`f l - i` (a call minus a var) = OK.  Prefer these anyway only when you need
+index-recursion; list-subterm recursion is still the safer default.
+
+### Wrapping byte arithmetic roundtrip — `U8.t` is OPAQUE, bridge via `v`/`v_inj`
+
+`FStar.UInt8.t` is declared `new val t : eqtype` (opaque), **NOT**
+definitionally equal to `FStar.UInt.uint_t 8` (`x:int{size x 8}`).  So
+`FStar.UInt.lemma_add_sub_cancel #8 a b` (typed over `uint_t n`) does **not**
+unify with `U8.t` arguments.  The `+`/`-` operators on `U8.t` are the
+*bounds-respecting* `add`/`sub` (refined, require `size (v a + v b) 8` — SMT
+cannot discharge for symbolic `a b`).  For **wrapping** arithmetic use
+`FStar.UInt8.sub_mod` / `add_mod` explicitly, and prove the roundtrip identity
+at the `v` level then lift with `v_inj`:
+
+```fstar
+open FStar.UInt8
+let lemma_wrap (a b: t) : Lemma (add_mod (sub_mod a b) b == a) =
+  FStar.UInt.lemma_add_sub_cancel #8 (v a) (v b);   (* over uint_t 8, i.e. int{size .. 8} *)
+  v_inj (add_mod (sub_mod a b) b) a                  (* v_inj : v x == v y ==> x == y *)
+```
+
+`lemma_add_sub_cancel #n a b : Lemma (add_mod (sub_mod a b) b == a)` and its
+dual `lemma_sub_add_cancel #n a b : Lemma (sub_mod (add_mod a b) b == a)` are in
+`FStar.UInt.fsti` (~line 592).  The PNG filter roundtrips (Sub/Up/Average/Paeth)
+all collapse to exactly this identity — the *predictor* value is irrelevant to
+its own inverse: `(x - p) + p == x` for ANY byte `p`.
+
+### `FStar.List.Tot` has **NO** `take`/`drop` — they live in `FStar.Sequence`
+
+`FStar.List.Tot.Base` exports `nth`/`index`/`rev`/`append`/`mapi`/`fold_left`
+etc., but **not** `take` or `drop` (those are `FStar.Sequence.Base.take`/
+`drop` over `Seq`, not `list`).  For list proofs needing a prefix/suffix, define
+your own (transparent, structural — they verify via plain recursion):
+
+```fstar
+let rec take (l: list a) (n: nat) : Tot (list a) (decreases n) =
+  if n = 0 then [] else match l with [] -> [] | x::xs -> x :: take xs (n-1)
+let rec drop (l: list a) (n: nat) : Tot (list a) (decreases n) =
+  if n = 0 then l else match l with [] -> [] | x::xs -> drop xs (n-1)
+```
+
+(The `decreases n` — a *bare* nat — is the safe form; see above.)
+
 ### `Seq.fold_left` / `Seq.count` are GONE — convert to a list first
 
 The post-KaRaMeL `FStar.Seq` (`FStar.Seq.Base`/`FStar.Sequence`) no longer
