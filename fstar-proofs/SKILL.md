@@ -4963,7 +4963,7 @@ smell that the proof was once fragile, not evidence it still is.**  (Same class
 as §75's "the admit hides a data bug" — the escape hatch outlives the problem it
 papered over.)
 
-## 76. Mutual-recursion-lemma invariant: `(k + length tail) / N` for consume-N-emit-1 chains
+## 77. Mutual-recursion-lemma invariant: `(k + length tail) / N` for consume-N-emit-1 chains
 
 **Verified (fstar-image DataEncoding, 2026-10-03).** `bits_to_bytes` is an 8-way
 `let rec bits_to_bytes_b0 … and b1 … and … b7` chain that consumes one bit per
@@ -4991,7 +4991,7 @@ and prove it as the SAME mutual recursion as the function itself.  Do NOT try to
 prove only the entry point — the invariant is not expressible at the entry helper
 alone.
 
-## 77. `--admit_smt_queries true` ≠ `admit ()` — and it is often removable with a bound lemma
+## 78. `--admit_smt_queries true` ≠ `admit ()` — and it is often removable with a bound lemma
 
 **Verified (fstar-image DataEncoding, 2026-10-03).** Three `#push-options
 "--admit_smt_queries true"` regions wrapped `total_data_codewords`, `encode_bytes`,
