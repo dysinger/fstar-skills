@@ -4756,3 +4756,37 @@ the Reed-Solomon output is unchanged.  Run it first; it cost nothing and caught
 an `alpha_pow` known-answer bug (`0x10 · 0x02 = 0x20`, not `0x1D` — the `x^8→0x1D`
 reduction only fires at bit 7, so `alpha^8` is `0x02` multiplied eight times,
 not `0x10` twice).
+
+### Bound-tracking for `clmul`: keep `a` FIXED (position-indexed), don't double it
+
+The §53 "`a·2 < 2^15` bound lemma at every step" pain comes from the *doubling*
+form of carry-less multiply (`clmul_go acc a b` recurses with `a*2`).  Because
+`a` doubles once per halving of `b` (≤ 8 times for `<256` operands), no single
+FIXED bound `a < 2^n` is an invariant: `a` starts `< 256` and reaches `< 2^16`,
+so `a*2 < 2^n` requires `a < 2^{n-1}` which the doubling itself breaks on the
+next step.  Every attempt to pick `n` (15 vs 16) fails on the *other* side.
+
+**Fix — position-indexed `clmul`, `a` never doubles.**  Process bits of `b` by
+an explicit position `k` (count DOWN from 8 for a clean `decreases k`), and
+compute each contribution as `a * pow2 k` with `a` held FIXED (`< 256`):
+
+```fstar
+let bit (x k: nat) : nat = lemma_pow2_pos k; (x / pow2 k) % 2
+let rec clmul_go (acc a b k: nat) : Tot nat (decreases k) =
+  if k = 0 then acc
+  else let pos = k - 1 in
+       clmul_go (if bit b pos = 1 then xor15 acc (a * pow2 pos) else acc) a b (k - 1)
+let clmul (a b: nat) : nat = clmul_go 0 a b 8
+```
+
+Now `a < 256` holds at every depth (never mutates), and every contribution
+`a * pow2 k < 256 * 128 = 2^15`, so a single FIXED bound `acc < 2^15` closes —
+no dependent bound, no `a·2` obligation.  (The `assert_norm` trade-off: this
+form does NOT `assert_norm`-reduce on concrete bytes, because `pow2 (k-1)` and
+`a * pow2 k` don't unfold to literals.  Known-answer vectors must be stated on
+`gf_mul_go` — the doubling form — or proven by a separate Python-side
+bit-identity check.  For the *symbolic* comm/assoc proof, use the position form.)
+
+Also learned: `decreases (8 - k)` on a nat `k` FAILS to prove the termination
+VC `8 - (k+1) << 8 - k` (saturating nat subtraction; SMT can't see `k < 8` from
+the `k = 8` guard).  Count DOWN with `decreases k` and `k - 1` instead.
