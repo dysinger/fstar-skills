@@ -5247,3 +5247,76 @@ positions 14→8, `decreases d`) with the fixed-point note that `0x11D << (d-8)`
 only affects positions `< d`, so a single descending pass is NOT sufficient
 (bit `d-4` can be re-set above 8) — you must `while`-loop to a fixed point, or
 fold top-bit-first until `< 256`.
+
+## 84. Reversed-Accumulator Decoder Roundtrip — the `rev_involutive`/`append_l_cons`/`append_assoc`/`rev_rev'` Bridge
+
+> **⚠ SCOPE-REVISED (2026-10-04): the "no generic codec roundtrip" framing is
+> WRONG — see §60b.**  A 1D predicate-RUN (`satisfy_many1 f`) IS a generic 0-admit
+> `codec`; only the 2D delimiter-content (`take_until`) is per-instantiation
+> (§60's 2D-induction wall).  A hand-written list scanner is a **Mandate 22
+> violation** — use `satisfy_many1` (or finish `take_until`), do NOT bypass the
+> codec layer.  The `rev`/`append_l_cons` bridge below is retained as the
+> *internal* recipe for a delimiter decoder's SCAN (what the codec's `.dec`
+> does), NOT as a license to hand-roll a scanner in a consumer package.
+
+**Verified (fstar-dns `Network.DNS`, 0-admit, 2026-10-04).**  A variable-length
+*dotted-list* decoder (e.g. DNS `label ('.' label)*`, MIME `type "/" subtype`) that
+scans a run of chars with a **reversed accumulator** (prepending each byte, the
+natural `match bs with b::rest -> go rest (b::cur)` shape) produces `cur == rev run`.
+Proving `decode (encode d) == d` then hits the §14 append-opacity wall twice:
+once in the encoder (`lbl.label_bytes @ (dot :: …)`) and once in the decoder's
+`rev`.  The bridge that closes it is a FOUR-LEMMA chain, in this order:
+
+```fstar
+(* claim: decode_domain_go (run @ more) cur [] == decode_domain_go more (rev run @ cur) [] *)
+let rec lemma_decode_go_run (run more cur: list byte) : Lemma
+  (requires List.Tot.for_all is_label_char run)
+  (ensures decode_domain_go (run @ more) cur [] == decode_domain_go more (List.Tot.rev run @ cur) [])
+  (decreases run)
+  = match run with
+    | [] -> ()
+    | b :: rest ->
+      lemma_decode_go_run rest more (b :: cur);
+      FStar.List.Tot.Properties.rev_rev' (b :: rest);          (* rev == rev'  *)
+      FStar.List.Tot.Properties.rev_rev' rest;                 (* rev rest == rev' rest *)
+      FStar.List.Tot.Properties.append_assoc (List.Tot.rev rest) [b] cur;
+      FStar.List.Tot.Properties.append_l_cons b cur (List.Tot.rev rest);
+      ()
+```
+
+**The four facts, and WHY each is needed:**
+
+1. `rev (b::rest) = rev rest @ [b]` is *definitional* via `rev'` (`rev' (hd::tl) =
+   rev' tl @ [hd]`), but SMT does NOT unfold `rev` — so call `rev_rev' (b::rest)`
+   to expose `rev == rev'`.
+2. The IH fires on `(rest, more, b::cur)`, giving `… == decode_domain_go more
+   (rev rest @ (b::cur)) []`.  Its RHS uses `rev rest`, but the goal (after
+   exposing `rev'`) says `rev' rest` — so call `rev_rev' rest` to flip `rev' rest`
+   back to `rev rest`.
+3. The goal RHS is `rev (b::rest) @ cur` = `(rev' rest @ [b]) @ cur`; the IH RHS
+   is `rev rest @ (b::cur)`.  `append_assoc (rev rest) [b] cur` regroups
+   `(rev rest @ [b]) @ cur == rev rest @ ([b] @ cur)`.
+4. `[b] @ cur == b :: cur` is definitional, but the *argument order* matters:
+   `append_l_cons hd tl l : l @ (hd::tl) == (l @ [hd]) @ tl` — pass `append_l_cons
+   b cur (rev rest)` (params are `hd tl l`, NOT `l hd tl`; getting this backwards
+   is Error 189, "got byte, expected list").
+
+Then the single-label case closes with `rev_involutive lbl.label_bytes` (to fold
+`rev (rev …)` back to the label bytes) + `rev_length` (to discharge the `<= 63`
+guard through `rev`) + `append_l_nil` (to drop `rev run @ []`).
+
+**Key gotchas:**
+
+- The IH *must* thread `cur` (generalize over the accumulator), or the `b::rest`
+  case changes `cur` from `[]` to `[b]` and the IH on `cur=[]` won't match.  The
+  general statement is `decode_domain_go (run @ more) cur [] == decode_domain_go
+  more (rev run @ cur) []` — instantiate with `cur=[]` at the top-level lemma.
+- This is the *only* clean route when the accumulator genuinely must be reversed
+  (a dynamic delimiter split); §72 point (1)'s "prefer a forward accumulator" is
+  the better choice when you control the transform (fixed-width look-backs), but
+  a delimiter-boundary scan (a `.`, a `-->`) reverses its accumulator.  NOTE this
+  recipe is the INTERNAL mechanism of a delimiter `codec`'s `.dec` (§60/§60b) —
+  NOT a consumer-package scanner (Mandate 22).
+- Concrete *multi-label* vectors (e.g. `example.com`, 11 bytes) still won't
+  SMT-unfold; use `assert_norm` on the closed byte list (fstar-2026.09.20 §7),
+  NOT a general induction over the label list.
