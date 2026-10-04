@@ -5042,3 +5042,64 @@ ask "what single refinement/bound is SMT failing?" — usually it is one
 `small_mod`, `lemma_div_mul`) closes it.  A `Lemma` CAN be called inside a `Tot`
 `map` lambda when its only job is to produce the argument's refinement (the
 `ensures` is the bound the lambda then uses).
+
+## 79. `open Data.Codec` shadows `pow2` with an `int` return — a silent refinement-killer
+
+**Verified (fstar-image QRCode Matrix/Encode, 2026-10-04).** `Data.Codec.Types.pow2`
+is declared `let rec pow2 (n: nat) : Tot int` (returns **`int`**, not `nat`/`p>0`).
+Any module that does `open Data.Codec` (or `open Data.Codec.Types`) gets that
+`pow2`, and then division/`nonzero` refinements silently break:
+
+```fstar
+// Error 19: Expected Prims.nonzero got Prims.int — pow2 (pos-1) <> 0
+((val_ / pow2 (pos - 1)) % 2 = 1)
+// Error 19 (x2): bit_mask <> 0 ; shifted >= 0
+let bit_mask = pow2 pos in dividend / bit_mask
+```
+
+The `int` return defeats BOTH the `nonzero` divisor refinement (`x / d` needs
+`d <> 0`) and the `nat` (non-negativity) refinement (`gen * pow2 …`).  SMT
+cannot prove `int <> 0` / `int >= 0` for a symbolic `n`.
+
+**Fix — a local refined `pow2` (mirrors the sibling modules):**
+
+```fstar
+let rec pow2_pos (n: nat) : Tot (p:nat{p > 0}) (decreases n) =
+  if n = 0 then 1 else 2 * pow2_pos (n - 1)
+```
+
+`Data.Image.QRCode.DataEncoding` and `.GF256` already define their own local
+`pow2` with a positive refinement; the bug only bites modules that fall back to
+the `open Data.Codec` shadow.  Name it `pow2_pos` (not `pow2`) so it cannot be
+accidentally re-shadowed.  This is the SAME class as §78 — a single missing
+refinement, not a proof gap: the "pre-existing errors" in the GADT-era source
+were never a real algorithm bug, only the wrong `pow2`'s return type.
+
+## 80. `select_best_mask`-style loops: refine the ACCUMULATOR param, not a post-hoc admit
+
+**Verified (fstar-image Matrix, 2026-10-04).** An "iterate `mid` 0..7, keep the
+best" loop returns `nat{0 <= r /\ r <= 7}`.  The GADT-era source admitted the
+range with `--admit_smt_queries true` + a "Category (b)" comment.  The fix needs
+NO lemma and NO admit — refine the recursion's parameters so the range is a
+*typing* invariant:
+
+```fstar
+let select_best_mask (m: qr_matrix) : (r:nat{0 <= r /\ r <= 7}) =
+  let rec find_best (mid: nat{mid <= 8}) (best_mid: nat{best_mid <= 7}) (best_pen: nat)
+    : Tot (r:nat{r <= 7}) (decreases (8 - mid)) =
+    if mid >= 8 then best_mid
+    else let pen = mask_penalty m mid in
+         if pen < best_pen then find_best (mid + 1) mid pen
+         else find_best (mid + 1) best_mid best_pen
+  in find_best 0 0 (mask_penalty m 0)
+```
+
+- `mid : nat{mid <= 8}` — when `mid < 8`, `mid <= 7` holds, so assigning
+  `best_mid := mid` satisfies the `best_mid <= 7` refinement; `mid + 1` stays `<= 8`.
+- `best_mid : nat{best_mid <= 7}` — the value returned is always in range.
+- The body's `decreases (8 - mid)` stays well-founded (bare `8 - mid`, an
+  application-minus-var, parses fine — fstar-2026.09.20 §8).
+
+When the "impossible" refinement is actually a `match`/`if`-terminator fact,
+make the *parameter* carry the bound instead of asking SMT to track it through
+the whole recursion.

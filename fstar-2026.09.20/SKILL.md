@@ -279,9 +279,15 @@ Makefile uses `--no_default_includes`):
 
 - Skip re-verifying the Pulse stdlib with
   `--already_cached Prims,FStar,Pulse.Nolib,Pulse.Lib,Pulse.Class,PulseCore`.
-- **Seed the `--cache_dir`** with pre-verified `*.checked` (from the
-  `fstar-checked` "ulib.checked" artifact) or Error 317 ("Expected Prims to be
-  already checked") fires.
+- **Seed the `--cache_dir`** with pre-verified `*.checked` or Error 317
+  ("Expected Prims to be already checked") fires.  The three sources are
+  (a) `$FSTAR_CHECKED/*.checked` (333 files — the `fstar-checked` flake input,
+  exported as `FSTAR_CHECKED` by the flake devShell; the Makefile's
+  `--include $(FLIB)/ulib` dir has **no** `.checked`), (b)
+  `$(fstar.exe --locate_lib)/pulse/common.checked/*.checked`, and (c)
+  `$(fstar.exe --locate_lib)/pulse/pulse.checked/*.checked`.  Copy all three
+  into the cache dir (`cp $FSTAR_CHECKED/*.checked …` + both `pulse/*.checked`
+  dirs) — 517 files total; `Prims.fst.checked` only exists via (a).
 - `--codegen OCaml` now needs **one source file per invocation** (Error 10), and
   the dependencies' `.checked` files loaded (verify in dependency order, then
   extract with `--include cache`).
