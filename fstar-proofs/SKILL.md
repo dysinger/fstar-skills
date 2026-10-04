@@ -5103,3 +5103,44 @@ let select_best_mask (m: qr_matrix) : (r:nat{0 <= r /\ r <= 7}) =
 When the "impossible" refinement is actually a `match`/`if`-terminator fact,
 make the *parameter* carry the bound instead of asking SMT to track it through
 the whole recursion.
+
+## 81. A `% 256` (or `% N`) narrowing of `char`/code-point to `byte` silently reclassifies out-of-domain input
+
+**Verified (fstar-codec `char_to_byte`, 2026-10-04).** `Data.Codec` had:
+
+```fstar
+let char_to_byte (c: FStar.Char.char) : byte =
+  U8.uint_to_t (FStar.Char.int_of_char c % 256)
+```
+
+fed straight into ASCII-membership predicates (`char_is_digit`, `char_is_upper`,
+…).  The `% 256` is a **silent wrap**: a code point ≥ 256 collapses to an ASCII
+byte, so `char_is_digit '\u0130'` (U+0130 = 304; `304 % 256 = 48 = '0'`) returned
+`true`.  The `% N` narrowing is only *correct* on the in-domain inputs (`< 128`);
+everywhere else it manufactures a false positive.
+
+**Fix — map out-of-domain to a sentinel that NO predicate matches, keep the type total:**
+
+```fstar
+let char_to_byte (c: FStar.Char.char) : byte =
+  let i = FStar.Char.int_of_char c in
+  if i < 128 then U8.uint_to_t i else 0xFFuy   (* 0xFF matches no ASCII predicate *)
+```
+
+Total and unchanged at every call site (no refinement bleed through the 8
+`char_is_*` callers + their literal-call tests), yet provably safe: pair it with
+a `lemma_non_ascii_char_byte` (requires `int_of_char c >= 128`, ensures the
+`0xFF` result) and a `lemma_ascii_char_byte_exact` (the `< 128` identity).  The
+alternative — a refinement `c: char{int_of_char c < 128}` on the parameter —
+DOES propagate (probe-verified) but forces every `char_is_*` to carry the same
+refinement and every literal call site to discharge `int_of_char '9' < 128`,
+churn for zero benefit when no caller needs the `char -> byte` total arrow.
+
+**General rule:** when narrowing a wide domain (int/char/code-point) into a
+narrow one (byte/ascii), never `% N` at the boundary unless you also prove the
+input stays in-domain.  Prefer the **sentinel-value totalization** (`if in_domain
+then exact else sentinel_that_matches_nothing`) over a refinement precondition:
+it is call-site-neutral, keeps the `char -> byte` type, and its lemmas are
+trivial (`= ()`).  Provide a non-ASCII regression TEST whose code point
+`mod 256` lands in the ASCII predicate range (e.g. U+0130 → `0x30`) — that is
+the vector that distinguishes the fix from the bug.
