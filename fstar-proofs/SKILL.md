@@ -5144,3 +5144,106 @@ it is call-site-neutral, keeps the `char -> byte` type, and its lemmas are
 trivial (`= ()`).  Provide a non-ASCII regression TEST whose code point
 `mod 256` lands in the ASCII predicate range (e.g. U+0130 → `0x30`) — that is
 the vector that distinguishes the fix from the bug.
+
+## 82. GF(2^8) field-law tower — verified milestones + the remaining homomorphism/Fermat work
+
+**Verified (fstar-image GF256, 2026-10-04, in progress).** The six hard field
+facts (mul comm/assoc/distrib, inverse, exp/log consistency) are a genuine
+finite-field formalization, distinct from all prior codec proofs.  Progress to
+date, all 0-admit:
+
+### LANDED (0-admit, committed)
+
+- `lemma_nat_xor_double x y n : nat_xor (2x) (2y) n = 2 * nat_xor x y (n-1)`
+  (n > 0) — definitional unfold, body `= ()` at `--fuel 1 --ifuel 1`.
+- `lemma_xor_bit_even a j w : nat_xor (pow2 j) (a·pow2(j+1)) w = pow2 j + a·pow2(j+1)`
+  with `requires w > j+1 /\ a·pow2(j+1) < pow2 w`.  This is the **bit-disjoint
+  XOR = add** fact.  Induction on `j` threading a *decreasing* width `w`; the
+  base case (`nat_xor 1 (2a) w = 1 + 2a`) needs `FStar.Math.Lemmas.lemma_mod_mul_distr_l 2 a 2`
+  (for `(2a)%2 = 0`), `lemma_div_exact (2a) 2` (for `(2a)/2 = a`), and
+  `lemma_xor_comm 0 a (w-1)` (to match `lemma_xor_zero a (w-1)`'s argument order).
+  **SMT will NOT reduce `(2a)%2=0` / `(2a)/2=a` unaided** — the two
+  `FStar.Math.Lemmas` calls are the unlock; `--fuel 2 --ifuel 2` scoped.
+
+### GROUND TRUTH (Python, exhaustive 256³) — the laws are TRUE, not admits-able
+
+- `gf_mul` commutativity: 0/65536 mismatches.
+- associativity over all triples: 0 mismatches.
+- distributivity over gf_add: 0 mismatches.
+- alpha = 0x02 generates the full group: order 255 (`2^255 = 1`), 255 distinct
+  nonzero powers — so Fermat `a^255 = 1` holds and the inverse/exponent route
+  (6.5/6.6) is sound.
+
+### THE REMAINING TOWER (not yet landed)
+
+- Position-indexed `clmul` (`a` FIXED, never doubles — §53/§74) typechecks and
+  `assert_norm`-reduces on concrete bytes (`clmul 3 5 = 15`).  Needs `pow2 :
+  nat -> p:nat{p>0}` (refined) for the `bit x k = (x / pow2 k) % 2` divisor.
+- **PROVEN in scratch (2026-10-04, land next session):** `lemma_xor_pad a b n k`
+  (`nat_xor a b (n+k) = nat_xor a b n` for `a,b < 2^n`, induction on `n`, base
+  case needs `lemma_xor_00` since SMT won't unfold `nat_xor 0 0 k = 0` from
+  `a < pow2 0 = 1` — `assert_norm (pow2 0 = 1)` alone is NOT enough) and its
+  instantiation `lemma_xor_16_eq_8 a b : nat_xor a b 16 = nat_xor a b 8` for
+  `a,b < 256`.
+- **The `reduce (2a) = red a` atom needs a bit-8 CANCELLATION fact, not the
+  generic `lemma_xor_16_eq_8`.**  `red a = xor8 (2a) 0x11D` (8-bit) vs
+  `reduce (2a) = xor16 (2a) 0x11D` (16-bit).  For `a >= 128` both `2a` and
+  `0x11D` have bit 8 SET, so `xor16` clears it (result `< 256`) while `xor8`
+  truncates it away — the two agree *because bit 8 cancels*, not because both
+  operands are `< 256` (`2a >= 256` in this branch, so `lemma_xor_16_eq_8` and
+  `lemma_xor_pad` do NOT apply).  Need `nat_xor (2a) 0x11D 16 = nat_xor (2a mod 256)
+  (0x11D mod 256) 8` (a truncation-cancellation lemma).  This is the fine-grained
+  bit-arithmetic that makes the bridge genuinely hard, not a single missing hint.
+- Bridge `gf_mul_go 0 a b = reduce (clmul a b)` (reduction is a ring
+  homomorphism), then `clmul` symmetry (double-fold index swap), then comm/assoc/
+  distrib follow.  The `reduce` homomorphism is the genuinely hard step.
+- 6.5/6.6: derive `gf_exp`/`gf_log` = repeated `gf_mul` power, then Fermat
+  `a^255 = 1` over the order-255 group (or 255-fold `assert_norm`).
+
+**Do NOT re-run a `--fuel 16` global query** (z3 diverges) or a single-pass
+bit-folding `reduce` (it does NOT stabilize — `x^8 ≡ 0x1D` folding creates NEW
+bits ≥ 8 that need re-folding; loop until `< 256`).
+
+## 83. The correct carry-less reduction fold is `0x11D << (d-8)`, NOT `0x1D` — and it auto-clears bit d
+
+**Verified (fstar-image GF256 Phase 6, 2026-10-04).**  Reducing a carry-less
+product `c` (`< 2^16`, i.e. degree ≤ 14) modulo the primitive poly
+`x^8+x^4+x^3+x^2+1` (0x11D) uses the **full 9-bit** 0x11D, not the "low part"
+0x1D:
+
+```python
+def reduce(c):
+    while c >= 256:
+        d = c.bit_length() - 1          # highest set bit, d >= 8
+        c ^= 0x11D << (d - 8)           # clears bit d and folds low bits
+    return c
+```
+
+Why `0x11D` (not `0x1D = 0x11D & 0xFF`): the relation is `x^8 = x^4+x^3+x^2+1`,
+so folding a set bit at position `d` (the `x^d` term, `d ≥ 8`) is the
+substitution `x^d ↦ x^{d-8}(x^4+x^3+x^2+1)`.  As a bit-operations this is:
+CLEAR bit `d`, and TOGGLE bits `{d-8, d-6, d-5, d-4}`.  `0x11D << (d-8)` has
+bits exactly `{d-8, d-6, d-5, d-4, d}` — the leading `x^8` coefficient of 0x11D
+lands ON bit `d`, so the single XOR **both clears `d` and folds the low part**.
+Using `0x1D << (d-8)` (the trailing-8-bits of 0x11D) leaves bit `d` SET, so the
+result never drops below 256 (verified: `reduce(clmul 0x53 0xCA)` gave `0x3d8f`
+instead of `0x8F`).  Using `0x71 << (d-8)` (bits {0,4,5,6}) is also wrong — the
+correct offsets from `d-8` are {0,2,3,4}, i.e. 0x1D's own bit positions, and the
+`x^8` term is what closes the fold.
+
+**Ground-truth guard (exhaustive):** `reduce(clmul a b) == gf_mul_go 0 a b` over
+all 65536 pairs — 0 mismatches.  `clmul a b = XOR_{k : bit_k(b)=1} (a << k)`
+(the position-indexed carry-less product, `a` fixed, degree ≤ 14).  This is the
+bridge that makes commutativity/associativity/distributivity reducible to
+`clmul`-symmetry + `reduce`-idempotence/linearity.
+
+**Termination gotcha:** the `while c >= 256` loop does NOT have an obviously
+`decreases`-provable measure as a bare `c` recursion (`xor16 c (0x11D << (d-8))`
+is not clearly `< c`).  The decreasing measure is `highest_bit c` (the degree):
+each fold clears the top bit and only touches strictly-lower bits, so the degree
+strictly drops.  In F*, define `reduce` recursing on `degree c` (a `decreases
+(degree c)`), not on `c`; or use a bounded 8-fold (`reduce_from c 14` descending
+positions 14→8, `decreases d`) with the fixed-point note that `0x11D << (d-8)`
+only affects positions `< d`, so a single descending pass is NOT sufficient
+(bit `d-4` can be re-set above 8) — you must `while`-loop to a fixed point, or
+fold top-bit-first until `< 256`.
