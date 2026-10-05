@@ -3693,6 +3693,51 @@ unless/until the 2D induction is cracked.
    roundtrip IS general over the CONTENT [list byte] (not just closed vectors).
 6. Verify under the full build `fstar.exe --z3rlimit 80`.
 
+### ⚑ CRACKED (verified, 2026-10-04, fstar-codec `17ce564`) — the "2D wall" was a MISSING INVARIANT
+
+The §60 conclusion that a symbolic `delim` hits an uncracked 2D-induction wall
+was **WRONG**.  `take_until` IS now a genuine generic `codec (list byte)` with a
+0-admit roundtrip.  The obstacle was never induction over BOTH `content` AND
+`delim`; it was the WRONG content-validity predicate.  The correct invariant is
+**delimiter-overlap-freedom**, not "no delimiter substring":
+
+```fstar
+let rec no_overlap_delim (delim: list byte) (content: list byte) : Tot bool (decreases content) =
+  match content with
+  | [] -> true
+  | _ :: tl -> no_overlap_delim delim tl && not (is_prefix_of delim (content @ delim))
+```
+
+i.e. NO non-empty suffix `s` of `content` has `is_prefix_of delim (s @ delim) = true`.
+This single list-level predicate rules out BOTH (a) a `delim` substring inside
+`content` AND (b) a trailing border that combines with the appended delimiter to
+form a premature match (the self-overlap case, e.g. `delim = [A;B;A]` with
+`content` ending in `[A;B]`).  It is EXACTLY the condition
+`scan_until_split delim (content @ delim @ r) == (content, delim @ r)` needs.
+
+Put `no_overlap_delim` INTO `wfcv` (so the roundtrip's `requires` carries it),
+and discharge the generic exactness by induction on `content` chaining:
+
+- `lemma_is_prefix_of_app_ignores_tail p l m` — `is_prefix_of p (l @ m) ==
+  is_prefix_of p l` when `|l| >= |p|` (the trailing `rest` cannot turn a
+  non-prefix into a prefix).  This is the "prefix-length argument" §60 said was
+  missing — it was just this one append-irrelevance lemma.
+- `lemma_no_overlap_cons` — unfold `no_overlap_delim` on a cons.
+- `List.Tot.append_assoc` — bridge `((b::tl) @ delim) @ rest` to
+  `(b::tl) @ (delim @ rest)` (⚠ qualify as `List.Tot.append_assoc`, NOT bare
+  `append_assoc`, because `open FStar.Seq` shadows it with `Seq.append_assoc`).
+- `lemma_scan_prefix` / `lemma_scan_cons_no_prefix` — unfold `scan_until_split`
+  in the `is_prefix_of=true` and `=false` cases respectively.
+
+The roundtrip body then bridges the byte_seq boundary with the already-exported
+`lemma_seq_to_list_of_list_append` and `lemma_seq_of_list_length`; `rest_cond = True`
+(the delimiter is INSIDE the encoding as `content @ delim`, so the trailing `r` is
+unconstrained).  Consumers calling `.roundtrip` prove only that their content
+satisfies `no_overlap_delim` for their (concrete) `delim` — definitional/`assert_norm`.
+
+This supersedes §60's "per-instantiation only" conclusion and the `one_of`-pattern
+NOTE on `take_until`.  4/4 targets GREEN, 0 admits.
+
 ---
 
 ---
@@ -3718,9 +3763,15 @@ shape `lemma_digits_process_list` already proves for the *concrete* `is_digit`.
 1. **Predicate run (1D) → ship generic.**  Generalize `is_digit → f: byte -> bool`;
    the induction is unchanged (single cons step per byte, stop at first
    `not (f b)`).  This is `satisfy_many0`/`satisfy_many1`.
-2. **Delimiter content (2D) → per-instantiation only (§60).**
-   `no_delim delim (b::tl)` needs a prefix-length argument; a symbolic `delim`
-   does not unfold in lockstep with the scan.
+2. **Delimiter content (2D) → generic, via delimiter-overlap-freedom (§60
+   "⚠ CRACKED", fstar-codec `17ce564`).**  The prior §60 claim "per-instantiation
+   only" was WRONG: the obstacle was NOT a 2D induction but a missing invariant.
+   Add `no_overlap_delim delim content` (no non-empty suffix `s` has
+   `is_prefix_of delim (s @ delim)`) to the codec's `wfcv`; then
+   `lemma_scan_until_split_general` discharges by induction on `content` (not
+   on `delim`), chaining `lemma_is_prefix_of_app_ignores_tail` (the missing
+   "prefix-length argument") + `List.Tot.append_assoc` + the scan-unfold lemmas.
+   That is exactly `take_until : codec (list byte)`.
 
 **Placement rule (the §11-correction, sharpened):** the roundtrip MUST be
 written **inside `Data.Codec.Types`**, where `lemma_seq_to_list_of_list_append`
@@ -5248,16 +5299,96 @@ only affects positions `< d`, so a single descending pass is NOT sufficient
 (bit `d-4` can be re-set above 8) — you must `while`-loop to a fixed point, or
 fold top-bit-first until `< 256`.
 
+### Bit-arithmetic atoms LANDED this session (2026-10-04, commits 05ddb9e + 3407b66)
+
+All 0-admit, verified under `nix develop` (`fstar.exe --z3rlimit 120`):
+
+- `lemma_xor_00 k : nat_xor 0 0 k = 0` — SMT will NOT unfold this unaided (needs
+  induction on the bit count).  Body `= if k = 0 then () else lemma_xor_00 (k-1)`.
+- `lemma_xor_pad a b n k : nat_xor a b (n+k) = nat_xor a b n` for `a,b < 2^n`
+  (high-zero padding).  Base case `n=0` needs `lemma_xor_00 k`.  `--fuel 2 --ifuel 2`.
+- `lemma_cancel_pow2 n x y : nat_xor (2^n+x)(2^n+y)(n+1) = nat_xor x y n` for
+  `x,y < 2^n` (leading-bit cancellation, BOTH operands carry the 2^n bit).
+- `lemma_xor_shift_out n x y : nat_xor (2^n+x) y n = nat_xor x y n` for `x,y < 2^n`
+  (ONE operand's 2^n bit is OUTSIDE the n-bit window, so it is simply dropped).
+- `lemma_xor_trunc_both n x y : nat_xor (2^n+x)(2^n+y) n = nat_xor x y n` for
+  `x,y < 2^n` (TWO-sided truncation — both 2^n bits are outside the window).
+- `lemma_pow2_mono n m : pow2 n <= pow2 m` for `n <= m` (induction on `m`).
+- `lemma_xor_trunc_cancel a` for `128 <= a < 256`:
+  `nat_xor (2a) 0x11D 16 = nat_xor (2a%256) (0x11D%256) 8` — the §82 "bit-8
+  cancellation" atom.  Chains `cancel_pow2 8 (2a-256) 29` + `xor_pad (256+…)(256+29) 9 7`.
+- `lemma_reduce_from_drop_high c d` for `c < pow2 9`, `d >= 8`:
+  `reduce_from c d = reduce_from c 8` — uses `lemma_pow2_mono 9 d` + `c/pow2 d = 0`
+  to discharge the no-op folds.  (SMT needs the monotone fact; it will not infer
+  `c < 2^9 => c < 2^d` for `d >= 9` unaided.)
+- `lemma_reduce_double a : reduce (2a) = red a` for `a < 256` — the §82 friction
+  atom.  The reduce step (`nat_xor (2a) 0x11D 16`) and `red a = nat_xor (2a) 0x11D 8`
+  agree via `lemma_xor_trunc_cancel` (16-bit side) + `lemma_xor_trunc_both 8 x 29`
+  (8-bit side), both landing on `nat_xor (2a-256) 29 8`.
+
+**New `clmul`/`reduce` definitions landed** (commit 3407b66): `xor16`,
+`pow2_pos` (refined positive `pow2`, mirroring DataEncoding/Matrix — the plain
+`pow2 : nat -> nat` is NOT a valid divisor), `bit x k = (x / pow2_pos k) % 2`,
+`clmul_go`/`clmul` (position-indexed, `a` fixed), `refold = 0x11D`,
+`reduce_from c d`/`reduce c = reduce_from c 14` (single descending pass — verified
+`reduce (clmul a b) == gf_mul_go 0 a b` over all 65536 pairs in Python; the single
+pass 14→8 IS sufficient because `0x11D << (d-8)` only sets bits `< d`).
+
+**REMAINING (not yet proven, next session):** `lemma_clmul_split`
+(`clmul a b = xor16 (if b%2=1 then a else 0) (2 * clmul a (b/2))` — the linchpin
+for both the bridge and symmetry), the bridge `gf_mul_go p a b = xor8 p
+(reduce (clmul a b))`, `clmul` symmetry (double-fold index swap), then
+comm/assoc/distrib, then Fermat inverse + exp/log.  `lemma_clmul_split`'s base
+case already has `lemma_bit_zero`/`lemma_clmul_go_b0`/`lemma_clmul_b0` proven in
+scratch; the step needs `bit b k = bit (b/2) (k-1)` for `k >= 1` (unproven) and
+an accumulator-shift lemma mirroring `lemma_gf_mul_go_linear`.
+
+### REFINEMENT (2026-10-04, commit 135a87d + late-session analysis)
+
+Switched the carry-less product to a **Russian-peasant `raw_mul_go`** (identical
+body to `gf_mul_go` but with `a*2` instead of `red a` — no reduction):
+
+```fstar
+let rec raw_mul_go (acc a b: nat) : Tot nat (decreases b) =
+  if b = 0 then acc else raw_mul_go (if b % 2 = 1 then xor16 acc a else acc) (a * 2) (b / 2)
+let raw_mul (a b: nat) : nat = raw_mul_go 0 a b
+```
+
+`raw_mul` is bit-identical to the position-indexed `clmul` over all 65536 pairs
+(Python, 0 mismatch), and its `gf_mul_go`-shape makes the **bridge** trivial in
+structure (`gf_mul_go` = `raw_mul_go` with `red` substituted for `*2`).
+`lemma_bit_shift : bit x (k+1) = bit (x/2) k` is LANDED via
+`FStar.Math.Lemmas.division_multiplication_lemma x 2 (pow2_pos k)` (needs the
+*recursive* refined `pow2_pos`, NOT a `match` over plain `pow2` — that wrapper
+hides `pow2_pos (n+1) = 2·pow2_pos n`).
+
+**The accumulator-linearity blocker (identified, still open):**
+`lemma_raw_mul_go_linear acc a b : raw_mul_go acc a b = xor16 acc (raw_mul_go 0 a b)`
+mirrors `lemma_gf_mul_go_linear` (`--fuel 4 --ifuel 2`), but its base case and
+set-bit branch need `lemma_xor_zero16 a` (i.e. `a < 2^16`), while the recursion
+doubles `a` (`a' = a*2`) — so NO fixed bound `a < 2^16` is closed under the
+recurrence (`a*2` reaches `2^16` at the final unused doubling).  **The fix is a
+product-bound invariant**: `raw_mul_go` preserves `a * b` (`(2a)·(b/2) = a·b`),
+so for `a,b < 2^8` the multiplicand `a` (which is `a_original·2^k` at the k-th
+step) stays `< 2^16`, and more sharply the XORed-in value stays `< 2^15`.  Prove
+`lemma_raw_mul_doubles_bound` first (`a < 2^8 /\ b < 2^8` ⇒ every intermediate
+`a·2^k < 2^16`), then the linearity lemma carries `acc < 2^16` + `a < 2^16` and the
+recursive `a'` bound follows.  Do NOT re-run a global `--fuel 4 --ifuel 4` linearity
+query — it spins.
+
 ## 84. Reversed-Accumulator Decoder Roundtrip — the `rev_involutive`/`append_l_cons`/`append_assoc`/`rev_rev'` Bridge
 
 > **⚠ SCOPE-REVISED (2026-10-04): the "no generic codec roundtrip" framing is
-> WRONG — see §60b.**  A 1D predicate-RUN (`satisfy_many1 f`) IS a generic 0-admit
-> `codec`; only the 2D delimiter-content (`take_until`) is per-instantiation
-> (§60's 2D-induction wall).  A hand-written list scanner is a **Mandate 22
-> violation** — use `satisfy_many1` (or finish `take_until`), do NOT bypass the
-> codec layer.  The `rev`/`append_l_cons` bridge below is retained as the
-> *internal* recipe for a delimiter decoder's SCAN (what the codec's `.dec`
-> does), NOT as a license to hand-roll a scanner in a consumer package.
+> WRONG — see §60b and §60 "⚠ CRACKED".**  A 1D predicate-RUN (`satisfy_many1 f`)
+> IS a generic 0-admit `codec` (§60b), AND the 2D delimiter-content
+> (`take_until`) is ALSO now a generic 0-admit `codec (list byte)` (§60 "⚠ CRACKED",
+> fstar-codec `17ce564` — the obstacle was a missing INVARIANT, delimiter-overlap-
+> freedom `no_overlap_delim`, not an uncracked induction).  Neither is
+> per-instantiation.  A hand-written list scanner is a **Mandate 22 violation** —
+> use `satisfy_many1` (1D run) or `take_until` (delimiter-terminated run), do NOT
+> bypass the codec layer.  The `rev`/`append_l_cons` bridge below is retained as
+> an *internal* recipe (what a codec's `.dec` does internally), NOT as a license
+> to hand-roll a scanner in a consumer package.
 
 **Verified (fstar-dns `Network.DNS`, 0-admit, 2026-10-04).**  A variable-length
 *dotted-list* decoder (e.g. DNS `label ('.' label)*`, MIME `type "/" subtype`) that
@@ -5320,3 +5451,87 @@ guard through `rev`) + `append_l_nil` (to drop `rev run @ []`).
 - Concrete *multi-label* vectors (e.g. `example.com`, 11 bytes) still won't
   SMT-unfold; use `assert_norm` on the closed byte list (fstar-2026.09.20 §7),
   NOT a general induction over the label list.
+
+## 85. `sep_by1` (variable-length separator interleave) — TWO walls, and neither is a dodge
+
+**Session 2026-10-05.**  Mandate 22 ("no bespoke parser outside [Data.Codec]")
+exposed that DNS's dotted form `label ('.' label)*` and any `type "/" subtype`
+interleave need a **separator-fold combinator** that the codec library lacked.
+`count n c` writes `n` elements back-to-back with NO separator; `take_until`
+(with §60's cracked invariant) is delimiter-*TERMINATED*.  Neither expresses
+"elements separated BY a byte" (dot is a *separator*, not a terminator).
+
+The correct fix is a new `sep_by1 (c: codec a) (sep: codec unit) (max: nat)
+: codec (list a)` — `enc [x1..xn] = c.enc x1 ++ sep.enc () ++ … ++ c.enc xn`.
+Two independent walls were hit writing it; both are real, and NEITHER was
+solved by a consumer-package bypass.
+
+### Wall 1 — recursive-decoder termination on `decreases (Seq.length s)` does NOT terminate
+
+```fstar
+let rec sep_by1_dec c sep (s) (decreases (Seq.length s)) =
+  ... sep_by1_dec c sep (Seq.slice tail ns (Seq.length tail)) ...
+```
+
+F* rejects this: the recursive call's argument is `Seq.slice tail ns (|tail|)`
+of length `|s| − n1 − ns`, and the termination checker cannot prove
+`n1 + ns ≥ 1` for an *arbitrary* element `c` (a `pure`/`encode_empty` codec
+consumes 0).  `count_dec_list` dodges it with `decreases m` (a nat counter), not
+a Seq length.  **The fix is a fuel parameter** (`decreases fuel`, decrement by 1
+each recursion) — the SAME recipe as `digits_to_int_decode_go` (§ … `k : nat`
+fuel) and the XML element decoder (§47 path (b)): thread a `max : nat` through
+`dec`, fold it into `wfcv` (`List.length vs ≤ max`), and use
+`sep_by1_dec c sep (max−1) …` for the recursive separator-pair step.  Fuel makes
+termination *syntactic*; correctness (fuel ≥ #elements) is a separate `wfcv`
+obligation discharged at the call site (DNS labels are ≤ 127 by RFC 1035).
+
+### Wall 2 — concrete vectors do NOT reduce through a `product`/`map_`-composed codec
+
+For MIME `mime_bytes_codec = map_ … (product (product token (byte_val 0x2Fuy))
+token)`, NEITHER `enc` nor `dec` reduces under SMT/`--fuel`/`assert_norm`:
+
+- `dec` goes `map_.dec → product.dec → satisfy_run_dec → satisfy_run_scan`; the
+  `Inr (v,n1) → Seq.slice → sep.dec → Seq.slice` chain is opaque.  `--fuel 4
+  --ifuel 2` does NOT help (the opacity is the `product`/`map_` indirection, not
+  fuel on `let rec`).
+- `enc` reduces to `seq_to_list (seq_of_list [t] ++ Seq.create 1 0x2Fuy ++
+  seq_of_list [s])`, but `assert_norm` will NOT finish `Seq.append`/`Seq.create`/
+  `seq_to_list` back to a literal list — `Seq` is abstract, and the normalizer
+  doesn't unfold its representation.
+
+**The paying pattern (0-admit, nix-GREEN):**
+
+1. Prove encode-correctness of the COMPOSED codec with `Seq.lemma_eq_intro
+   (codec.enc mb) (seq_of_list [expected…])` — pointwise `Seq` equality reduces
+   both sides WITHOUT unfolding `Seq.append`.
+2. Prove decode-correctness via the GENERIC `sep_by1_roundtrip`/`.roundtrip`
+   (induction over the list), stated at the **Seq level** (`codec.dec (enc v ++
+   empty) == Inr (v, |enc v|)`) — mirroring `lemma_label_codec_roundtrip`'s
+   `Seq.append … Seq.empty` form, NOT a bare `enc v` (avoid the append-nil bridge).
+3. The reverse-inverse bridge `seq_of_list (seq_to_list s) == s` is
+   `lemma_seq_list_bij`; list length == Seq length comes from
+   `lemma_seq_of_list_length` applied to `seq_to_list (enc v)` combined with
+   `lemma_seq_list_bij (enc v)` — assert `Seq.length enc == List.length (seq_to_list enc)`
+   explicitly.
+4. Decode reject-cases (empty type/subtype) are `wfcv`-falsity lemmas, NOT
+   `dec == None` lemmas: `match codec.wfcv {…} with true -> False | false -> True`
+   reduces (it is a `bool` conjunction), while `dec [bad bytes] == None` does not.
+
+### The process lesson (write this down, stop repeating it)
+
+The failure mode across §60 → §84 → §85 was: *land a combinator/consumer, claim
+"done", hit a real wall, then silently work around it with a per-package bespoke
+scanner instead of either (a) finishing the foundation or (b) recording the wall
+as an explicit OPEN with the honest scope.*  The fix is enforced now:
+
+- A `codec`-layer combinator is NOT "done" until it has a 0-admit generic
+  `.roundtrip` under the nix build (`--z3rlimit 120`), not the LSP (`fstar.exe
+  --lsp` is looser, §47/§52).
+- A consumer package is NOT "done" until `grep` for the bespoke scanner names is
+  EMPTY **and** its roundtrip goes through the codec's `.roundtrip`, not a
+  re-proven list-level `let rec`.
+- When a wall is hit, STOP; record it (fuel/termination, or Seq-reduction) HERE
+  with the exact failing shape and the NEXT concrete experiment — do NOT emit a
+  bypass.  The `sep_by1` fuel fix (Wall 1) + `Seq.lemma_eq_intro` (Wall 2) recipe
+  above is the 0-admit route for `(element sep)* element` interleaves (DNS dotted
+  names, MIME/was already closed via `product`+`map_`, PATH/CSV/etc.).
