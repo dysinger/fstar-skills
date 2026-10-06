@@ -5376,6 +5376,47 @@ step) stays `< 2^16`, and more sharply the XORed-in value stays `< 2^15`.  Prove
 recursive `a'` bound follows.  Do NOT re-run a global `--fuel 4 --ifuel 4` linearity
 query — it spins.
 
+**✅ CRACKED (2026-10-05):** the two atoms ARE proven 0-admit, and the invariant
+is SHARPER than "a·2^k < 2^16".  Landed in fstar-image `17f715a`:
+- `lemma_raw_mul_doubles_bound a0 k : a0 < 256 /\ k <= 7 ⟹ a0 * pow2 k < pow2 15`
+  — the *sharp* crossing: the multiplicand is doubled at most 7 times while `b < 2^8`
+  still has set bits; the 8th doubling (a0·2⁸ < 2¹⁶) is the DEAD, never-XORed value.
+  So every XORed multiplicand stays `< 2^15`.  Body is pure arithmetic
+  (`assert_norm (pow2 7=128; pow2 15=32768; pow2 8=256)` + `lemma_pow2_mono k 7`).
+- `lemma_raw_mul_go_linear acc a b : raw_mul_go acc a b = xor16 acc (raw_mul_go 0 a b)`
+  carries the **CLOSED product invariant `acc < 2^16 /\ a * b < 2^16`** — NOT a fixed
+  bound on `a`.  The product `a*b` is non-increasing under `a→a*2, b→b/2`
+  (`(2a)·(b/2) = a·b` even, `= a·(b−1)` odd), so it closes; and in the set-bit branch
+  `b ≥ 1` so `a*b < 2^16 ⟹ a < 2^16`, discharging `nat_xor_zero a 16`.  `--fuel 4 --ifuel 2`.
+
+**KEY GROUND-TRUTH FINDING (Python exhaustive):** `reduce` is GF(2)-linear ONLY on
+inputs `< 2^15` — the single descending pass 14→8 is *incomplete* for bit-15 inputs
+(full 16-bit operands give ~50% mismatch).  `raw_mul a b < 2^15` always (max 32766),
+so the bridge `reduce (raw_mul a b) = gf_mul_go 0 a b` is within linearity scope.
+
+**Bridge atoms LANDED 0-admit (fstar-image `113c949`):**
+- `lemma_xor_16_eq_8 x y : xor16 x y = xor8 x y` for `x,y < 256` (via `lemma_xor_pad 8 8`).
+- `lemma_reduce_id c : reduce c = c` for `c < 256` (`lemma_reduce_from_drop_high c 14`
+  + bit-8-zero makes `reduce_from c 8 = c`).
+- `lemma_nat_xor_bit x y w d : bit d (nat_xor x y w) = (bit d x + bit d y) % 2` for
+  `d < w` — the branch-distribution fact for the linearity induction.  Induction on `d`
+  via `lemma_bit_shift` (bit d of /2 = bit d−1) + `lemma_pow2_pos_succ`.
+
+**⚠ REMAINING WALL (the bridge linchpin):** `lemma_reduce_from_xor d x y :
+reduce_from (xor16 x y) d = xor16 (reduce_from x d) (reduce_from y d)` for
+`x,y < 2^d` (reduce GF(2)-linearity).  The one-step commutation
+`lemma_reduce_step_xor p x y` needs a 4-way case split on `(bit x p, bit y p)`; the
+branch bit `((x/2^p)%2 + (y/2^p)%2) % 2` DOES distribute (via `lemma_nat_xor_bit`),
+and the algebra needs only `lemma_xor_self r 16` (the two `r`'s cancel when both bits
+set) + `lemma_xor_assoc`/`lemma_xor_comm`.  But SMT will NOT case-split the
+conditional `match (x/pow2_pos p)%2 = 1` against those algebraic equalities — the
+`modulo_range_lemma` gives `(x/2^p)%2 < 2` but the `match` in the `ensures` goal does
+not reduce through `nat_xor`.  DO NOT re-grind this query (it spins at high fuel).
+The planned clean form is `nat_xor (if bx=1 then r else 0) (if yb=1 then r else 0) 16
+= if (bx+yb)%2=1 then r else 0` with `bx,yb ∈ {0,1}`, needing an explicit `bx*r`
+(`bx ∈ {0,1}` ⇒ the conditional is multiplication by the bit) rewrite before SMT.  Try
+that (`if bx=1 then r else 0  ≡  bx * r`) next, NOT raw case-fuel.
+
 ## 84. Reversed-Accumulator Decoder Roundtrip — the `rev_involutive`/`append_l_cons`/`append_assoc`/`rev_rev'` Bridge
 
 > **⚠ SCOPE-REVISED (2026-10-04): the "no generic codec roundtrip" framing is
