@@ -5496,6 +5496,42 @@ any remaining bit test — use `match bx` (bool) not `nat{bx<=1}`.  And the
 types as `int`; use a fuel counter or an `int`-typed measure, not a combined
 `(256-a)*257 + 256-b` (the `*` collides with tuple-`*` in a `list (nat*nat)` return).
 
+**✅ PROGRESS (2026-10-06 session): bilinearity LANDED 0-admit (`fstar-image`
+`4200cc4`).**  The carry-less product's distributivity law (plan Lemma 3):
+- `lemma_xor16_middle p q r s : (p.r).(q.s) = (p.s).(q.r)` — the middle-four
+  xor16 interchange, a 5-step `lemma_xor_assoc`/`_comm` chain.  (The chain order
+  matters: assoc p r (q.s); assoc r q s; comm r q; assoc q r s; assoc p q (r.s).)
+- `lemma_xor16_double_gen a b : xor16 (2a)(2b) = 2·(xor16 a b)` for `a,b < 2^15`
+  (`lemma_nat_xor_double a b 16` + `lemma_xor_pad a b 15 1`).
+- `lemma_raw_mul_go_bilinear accA accB a b c : raw_mul_go (accA.accB) (a.b) c =
+  raw_mul_go accA a c . raw_mul_go accB b c` — splits BOTH accumulator and
+  multiplicand over xor16.  Precondition is the CLOSED product invariant
+  `a*c < 2^15 ∧ b*c < 2^15` (NOT `a<256`, which the per-step `a→2a` doubling
+  breaks; `(2a)·(c/2) = a·c` is preserved).  `a*c<2^15` gives `a<2^15` for the
+  `_double_gen` call at each non-base step.
+
+**⚠ NEXT (symmetry, still open):** `raw_mul a b = raw_mul b a` needs the bit
+  decomposition + double-sum.  The Russian-peasant `raw_mul` DOUBLES `a` each
+  step, so the shift identity `raw_mul (pow2 i) b = pow2 i·b` hits the "one past
+the end" off-by-one (i reaches 8, then 9) AND the product bound
+  `(2·2^8)·(b/2) < 2^16` fails.  PIVOT to the position-indexed `clmul` (a FIXED,
+  never doubles) for symmetry: `clmul a b = XOR_{pos<8} (bit_pos b ? a·2^pos : 0)`,
+  then expand `a = XOR_i bit_i a · 2^i` to get the symmetric double sum
+  `XOR_{i,j} bit_i a · bit_j b · 2^{i+j}`.  The remaining lemma is a PURE
+  combinatorial grid fold-swap:
+  ```
+  grid_sum f n m  = XOR_{i<n} XOR_{j<m} f i j   (row-major)
+  grid_sum_t f n m = XOR_{j<m} XOR_{i<n} f i j   (column-major)
+  lemma_grid_swap f n m : grid_sum f n m = grid_sum_t f n m
+  ```
+  Since `xor16` is comm+assoc, this is order-independence of the double fold.
+  Prove by induction on `n` with a SEPARATE (non-mutually-recursive) helper
+  `lemma_row_insert f i m : xor16 (row f i m) (grid_sum_t f i m) = grid_sum_t f (i+1) m`
+  (induction on `m`).  The mutual `let rec ... and ...` with MISMATCHED `decreases`
+  (n vs m) makes F* flag `m << n` — split the two lemmas apart.  The step needs
+  xor16 assoc/comm (`lemma_xor16_middle`) + `col f (i+1) x = xor16 (f i x) (col f i x)`.
+  Do NOT try to prove symmetry directly on `raw_mul`'s doubling recursion.
+
 ## 84. Reversed-Accumulator Decoder Roundtrip — the `rev_involutive`/`append_l_cons`/`append_assoc`/`rev_rev'` Bridge
 
 > **⚠ SCOPE-REVISED (2026-10-04): the "no generic codec roundtrip" framing is
