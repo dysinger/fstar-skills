@@ -5498,7 +5498,7 @@ types as `int`; use a fuel counter or an `int`-typed measure, not a combined
 
 **✅ PROGRESS (2026-10-06 session): bilinearity LANDED 0-admit (`fstar-image`
 `4200cc4`).**  The carry-less product's distributivity law (plan Lemma 3):
-- `lemma_xor16_middle p q r s : (p.r).(q.s) = (p.s).(q.r)` — the middle-four
+- `lemma_xor16_middle p q r s : (p.r).(q.s) = (p.q).(r.s)` — the middle-four
   xor16 interchange, a 5-step `lemma_xor_assoc`/`_comm` chain.  (The chain order
   matters: assoc p r (q.s); assoc r q s; comm r q; assoc q r s; assoc p q (r.s).)
 - `lemma_xor16_double_gen a b : xor16 (2a)(2b) = 2·(xor16 a b)` for `a,b < 2^15`
@@ -5517,19 +5517,24 @@ the end" off-by-one (i reaches 8, then 9) AND the product bound
   `(2·2^8)·(b/2) < 2^16` fails.  PIVOT to the position-indexed `clmul` (a FIXED,
   never doubles) for symmetry: `clmul a b = XOR_{pos<8} (bit_pos b ? a·2^pos : 0)`,
   then expand `a = XOR_i bit_i a · 2^i` to get the symmetric double sum
-  `XOR_{i,j} bit_i a · bit_j b · 2^{i+j}`.  The remaining lemma is a PURE
-  combinatorial grid fold-swap:
-  ```
-  grid_sum f n m  = XOR_{i<n} XOR_{j<m} f i j   (row-major)
-  grid_sum_t f n m = XOR_{j<m} XOR_{i<n} f i j   (column-major)
-  lemma_grid_swap f n m : grid_sum f n m = grid_sum_t f n m
-  ```
-  Since `xor16` is comm+assoc, this is order-independence of the double fold.
-  Prove by induction on `n` with a SEPARATE (non-mutually-recursive) helper
-  `lemma_row_insert f i m : xor16 (row f i m) (grid_sum_t f i m) = grid_sum_t f (i+1) m`
-  (induction on `m`).  The mutual `let rec ... and ...` with MISMATCHED `decreases`
-  (n vs m) makes F* flag `m << n` — split the two lemmas apart.  The step needs
-  xor16 assoc/comm (`lemma_xor16_middle`) + `col f (i+1) x = xor16 (f i x) (col f i x)`.
+  `XOR_{i,j} bit_i a · bit_j b · 2^{i+j}`.
+
+**✅ GRID FOLD-SWAP LANDED 0-admit (`fstar-image` `8bd00d2`):** the double-XOR
+  order-independence fact is proven (`grid_sum f n m = grid_sum_t f n m`), with
+  helpers `lemma_grid_t_zero`, `lemma_row_append` and NO dead parameters on the
+  folds.  **KEY GOTCHA:** a dead `width` param on `fold_row`/`grid_t` (an unused
+  `m`/`n` that is redudantly passed) makes SMT REFUSE the one-step unfolds —
+  `fold_row f i m (m-1)` vs `fold_row f i (m-1) (m-1)` look like different
+  applications even though the dead param makes them equal.  DROP dead params
+  from the fold definitions FIRST (`fold_row f i j` over `j<m`, `grid f m i`,
+  `grid_t f n j`), then the `assert (row f i m = xor16 (f i (m-1)) (row f i (m-1)))`
+  one-step unfolds discharge at `--fuel 2`.  Also: the base case `grid_sum_t f 0 m = 0`
+  is NOT `= ()` — it needs `lemma_grid_t_zero` (induction on m, since `grid_t f 0 m`
+  recurses to `grid_t f 0 0` through zero columns).
+
+**⚠ REMAINING for symmetry:** the bit decomposition `a = XOR_{i<8} bit_i a · 2^i`
+  (for `a<256`) and the bridge `clmul a b = dsum a b` (expand `a` via its bits,
+  distribute over `_linear_a`), then `clmul a b = clmul b a` via `lemma_grid_swap`.
   Do NOT try to prove symmetry directly on `raw_mul`'s doubling recursion.
 
 ## 84. Reversed-Accumulator Decoder Roundtrip — the `rev_involutive`/`append_l_cons`/`append_assoc`/`rev_rev'` Bridge
