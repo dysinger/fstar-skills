@@ -5417,6 +5417,85 @@ The planned clean form is `nat_xor (if bx=1 then r else 0) (if yb=1 then r else 
 (`bx ∈ {0,1}` ⇒ the conditional is multiplication by the bit) rewrite before SMT.  Try
 that (`if bx=1 then r else 0  ≡  bx * r`) next, NOT raw case-fuel.
 
+**✅ SELECT ATOM CRACKED (2026-10-05, fstar-image `84ae36c`):** the `bx*r` route
+side-steps the conditional, but the REAL unlock is a **BOOLEAN selector**, not a
+`nat` with `<= 1`.  The 0-admit lemmas landed this session:
+
+```fstar
+let s (bx: bool) (r: nat) : nat = if bx then r else 0
+
+#push-options "--fuel 2 --ifuel 2 --z3rlimit 120"
+let lemma_select_xor_bool (bx yb: bool) (r: nat) : Lemma
+  (requires r < 65536)
+  (ensures nat_xor (s bx r) (s yb r) 16 = s (bx <> yb) r)
+  = assert_norm (pow2 16 = 65536);
+    match bx, yb with
+    | false, false -> lemma_xor_00 16
+    | false, true  -> lemma_xor_zero r 16; lemma_xor_comm 0 r 16
+    | true,  false -> lemma_xor_zero r 16
+    | true,  true  -> lemma_xor_self r 16
+#pop-options
+```
+
+**WHY a `bool` and NOT `nat{bx<=1}`:** with `bx : nat{bx<=1}`, SMT gets `bx<=1` as a
+hypothesis but will NOT beta-reduce `s bx r` (the `let`-bound `if bx=1`) because `bx`
+is a symbolic nat — the `match (x/pow2 p)%2 = 1` conditional never fires.  With
+`bx : bool`, `match bx, yb with | false, true -> ...` binds `bx=false, yb=true`
+STRUCTURALLY, so `s bx r` reduces to `0`/`r` in each branch and the four cases
+close via `lemma_xor_00` (the `nat_xor 0 0 16 = 0` fact — SMT will NOT unfold this,
+needs induction) + `lemma_xor_zero` + `lemma_xor_self`.  A BOOLEAN (or a `match`-able
+sum) is the requirement for conditional reduction, not a numeric bound.
+
+**On top of the select atom, this session also landed 0-admit:**
+`lemma_reduce_step_xor` (one-step reduce commutation, needs `8 <= d < 16` to bound
+`refold · 2^(d-8) < 2^16` via `lemma_pow2_pos_mono 7` + `assert_norm (refold=285)`),
+`lemma_step_xor` (full step linearity via a 7-step `lemma_xor_assoc`/`_comm` chain),
+and `lemma_reduce_from_base` (`reduce_from` identity below `d < 8`).
+
+**⚠ CONFIRMED STILL A WALL (same session):** the FULL `lemma_reduce_from_xor` induction
+(reduce_from (xor16 x y) d = xor16 (reduce_from x d) (reduce_from y d)) still SPINS
+at every fuel/rlimit — even the bare base `assert` `reduce_from (xor16 x y) d =
+xor16 x y` for `d < 8` discharges ONLY in isolation with a concrete `reduce_from`
+step; in the full module a bare non-recursive `reduce (xor16 x y) =
+xor16 (reduce x) (reduce y)` over `reduce = reduce_from _ 14` ALSO spins (unfolding
+`reduce_from c 14` for symbolic `c` is the blocker, independent of the select atom).
+The step atoms are NOT sufficient to make the induction terminate.  Do NOT re-grind.
+The remaining P2 route is exhaustive `assert_norm` over the 256×256 `gf_mul_go` table
+(a ~64K normalizer run, not SMT) — finite-field, so sound.  (Calibrated: 1024 terms
+> 60 s cold-cache, so the full 64K is ~1 h; the 16M distrib route is infeasible and
+should use associativity-chaining instead.)
+
+**⭐ POLYNOMIAL-STRUCTURE PROOF (DECISION 2026-10-06 — supersedes exhaustive):**
+Given the user's "most correct, 100% coverage, elegant, no brute-force" requirement,
+the bit-level `reduce`-linearity induction is the WRONG FRAME.  The correct proof is
+that `GF(256) = F₂[x]/(x⁸+x⁴+x³+x²+1)` is a quotient ring of a field, so the field
+laws are structural theorems, not bit-level SMT fights:
+
+- **`clmul` = polynomial multiplication over GF(2).**  Its commutativity,
+  bilinearity, and associativity are COEFFICIENT-SYMMETRY facts:
+  `clmul a b = XOR_{i:bit_i a=1, j:bit_j b=1} 2^{i+j}`, symmetric in `(i,j)`.
+  Prove via a double-sum index swap `(i,j)↔(j,i)` (fold-swap lemma + `xor16`
+  comm/assoc + induction) — NOT the bit-fold induction that was the wall.
+  Ground truth (Python): clmul commutative + bilinear over 256²/64³, 0 mismatches.
+- **`reduce` = quotient map `mod 0x11D`.**  This is the *one* hard fact: reduce
+  is a ring homomorphism (additive + multiplicative).  KEY INSIGHT: the current
+  `reduce_from c d` is a BIT-INDEXED fold — THAT is why linearity spins SMT
+  (unfolding `reduce_from c d` for symbolic `c` needs bit-position case-splits).
+  **REWRITE `reduce` as POLYNOMIAL SUBSTITUTION**: represent the product as a
+  list of monomials `x^k`, and reduce each `x⁸ ↦ x⁴+x³+x²+1` (the non-leading
+  part of 0x11D).  Linearity/associativity then follow from REWRITING the
+  substitution (induction over the monomial list), which SMT handles far more
+  readily than bit-position case-splits.
+- **Assemble:** `gfmul = reduce ∘ clmul`; comm/assoc/distrib follow from clmul
+  coefficient laws + reduce hom.  Inverse via `FStar.Math.Fermat.fermat_alt` +
+  order-255 cyclicity of GF(2⁸)*.  exp/log via 255-element group consistency.
+
+**Gotcha carry-over:** the Boolean-select lesson (§ this section) still applies to
+any remaining bit test — use `match bx` (bool) not `nat{bx<=1}`.  And the
+`nat - nat = int` pedantry: a `decreases` clause over `nat` subtraction (`256 - b`)
+types as `int`; use a fuel counter or an `int`-typed measure, not a combined
+`(256-a)*257 + 256-b` (the `*` collides with tuple-`*` in a `list (nat*nat)` return).
+
 ## 84. Reversed-Accumulator Decoder Roundtrip — the `rev_involutive`/`append_l_cons`/`append_assoc`/`rev_rev'` Bridge
 
 > **⚠ SCOPE-REVISED (2026-10-04): the "no generic codec roundtrip" framing is
