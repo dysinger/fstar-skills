@@ -5655,3 +5655,42 @@ as an explicit OPEN with the honest scope.*  The fix is enforced now:
   bypass.  The `sep_by1` fuel fix (Wall 1) + `Seq.lemma_eq_intro` (Wall 2) recipe
   above is the 0-admit route for `(element sep)* element` interleaves (DNS dotted
   names, MIME/was already closed via `product`+`map_`, PATH/CSV/etc.).
+
+### ✅ LANDED 2026-10-07 (0-admit, `make check` GREEN) — two MORE bugs beyond the §85 walls
+
+`sep_by1` is now a genuine `codec (list a)` in `fstar-codec` (`39f3b53`); DNS
+was rewritten over it (`domain_codec = sep_by1 label_codec (byte_val 0x2Euy)
+127`, bespoke scanners deleted).  Writing it surfaced TWO proof bugs NOT in the
+original §85 recipe; both are real and now recorded:
+
+1. **The separator's own `wfcv`/`wfcv_prop`/`rest_cond` MUST be carried into
+   `sep_by1_wfcv`/`wfcv_prop`/`rest_cond`.**  The roundtrip's `v :: tl` branch
+   calls `sep.roundtrip () (enc_tl ++ r)`, whose `requires` is `sep.wfcv () /\
+   sep.wfcv_prop () /\ sep.rest_cond () (enc_tl ++ r)`.  If `sep_by1_wfcv` only
+   requires `count_wfcv_list c vs` (the elements), the SMT cannot discharge
+   `sep.wfcv ()` — Error 19 "Failed to prove: sep.wfcv ()".  FIX: fold
+   `sep.wfcv () /\ sep.wfcv_prop ()` into `sep_by1_wfcv`/`sep_by1_wfcv_prop`,
+   and `sep.rest_cond () (sep_by1_enc c sep tl ++ r) /\ sep.wfcv () /\
+   sep.wfcv_prop ()` into the non-final branch of `sep_by1_rest_cond`.
+2. **`sep.enc ()` must be NON-EMPTY, and the trailing suffix `r` must be EMPTY.**
+   The greedy decoder's stop branch is `if Seq.length (slice s n1) = 0 then
+   Inr ([v], n1)`.  For the single-element (`tl = []`) roundtrip to reduce, the
+   suffix `r` must be empty (`slice (enc v ++ r) |enc v| = r` needs `r = []` to
+   be `[]` and hit the stop); for the `v :: tl` case, `rest = sep.enc () ++ …`
+   must be NON-empty (else the `if` wrongly stops before the separator).  FIX:
+   add `Seq.length (sep.enc ()) > 0` to `sep_by1_wfcv` and `Seq.length r = 0` to
+   the final-element branch of `sep_by1_rest_cond`.  (For DNS `byte_val 0x2Euy`
+   both hold definitionally; for a `pure ()` separator, `sep.enc ()` is EMPTY and
+   `sep_by1` is WRONG — callers must not pass a zero-width separator.)
+3. **The roundtrip body needs `Seq.append_empty_r` + `lemma_seq_list_bij` to
+   bridge the consumer wrapper** (`encode_domain d = seq_to_list (enc d.labels)`
+   vs `decode_domain`'s `seq_of_list (… )`): `dec (seq_of_list (seq_to_list
+   enc)) = dec enc = dec (enc ++ empty)` via `lemma_seq_list_bij enc` +
+   `Seq.append_empty_r enc` + `lemma_seq_of_list_length`.
+
+Also, the roundtrip's `requires` is cleanest stated as the codec's OWN fields
+(`domain_codec.wfcv ls /\ .wfcv_prop ls /\ .rest_cond ls Seq.empty`) — make the
+friendly `domain_wfcv` a DEFINITIONAL alias to `domain_codec.wfcv` (not an
+independent mirror), so no bridge lemma is needed; concrete DECODE vectors must
+be re-pointed at ENCODE (`Seq.lemma_eq_intro`) + reject (`wfcv`-falsity), never
+`assert_norm` on `.dec` (Wall 2).
