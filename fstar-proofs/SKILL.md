@@ -5746,3 +5746,57 @@ friendly `domain_wfcv` a DEFINITIONAL alias to `domain_codec.wfcv` (not an
 independent mirror), so no bridge lemma is needed; concrete DECODE vectors must
 be re-pointed at ENCODE (`Seq.lemma_eq_intro`) + reject (`wfcv`-falsity), never
 `assert_norm` on `.dec` (Wall 2).
+
+## 86. `sep_by1_trailing` (FQ trailing-dot form) — and the cross-codec DISAMBIGUATION wall
+
+**Session 2026-10-08.**  DNS's `fully_qualified` flag encodes the trailing-dot
+FQ form `example.com.` (every label, INCLUDING the last, followed by the `.`
+separator), vs the non-FQ form `example.com` (separator BETWEEN only, no
+trailing dot).  `sep_by1` (between-only) cannot express the FQ form, so:
+
+### `sep_by1_trailing` (combinator 24) — VERIFIED 0-admit
+
+`sep_by1_trailing (c) (sep) (max) : codec (list a)` where
+`enc [v1..vn] = c.enc v1 ++ sep ++ … ++ c.enc vn ++ sep` (trailing sep).  Built
+self-contained (own greedy decoder `(element sep)* sep`, fuel termination §85
+Wall 1) with the same structure as `sep_by1` — do NOT define `enc = sep_by1_enc
+++ sep.enc ()` (that breaks the list-induction decomposition: the recursive
+`v :: tl` case needs `enc (v::tl) == c.enc v ++ (sep ++ enc tl)` DEFINITIONALLY,
+which only holds if `enc` is written as a recursive function with the base
+`enc [v] = c.enc v ++ sep` and step `enc (v::tl) = c.enc v ++ sep ++ enc tl`).
+The roundtrip's final-element branch also carries `sep.wfcv ()/sep.wfcv_prop ()/
+sep.rest_cond () r` + `Seq.length r = 0` (the trailing separator is consumed,
+then the suffix must end).
+
+### The DISAMBIGUATION wall (cross-codec rejection) — §47-class, NOT fuel
+
+To roundtrip a name that carries BOTH forms behind one `decode_domain`, the
+decoder must try one codec and fall back to the other:
+- `decode_domain (FQ-first)`: for a NON-FQ encoding the FQ codec must REJECT it,
+- `decode_domain (nonFQ-first)`: for an FQ encoding the non-FQ codec must not
+  whole-consume it.
+
+Either direction needs a lemma of the form "codec A's decoder returns `Inl`
+(or `n < |enc|`) on codec B's encoding", i.e. `sep_by1_trailing_dec (sep_by1_enc
+vs) == Inl _` (or the dual).  This is an induction over TWO interacting
+recursive decoders and is **NOT provable generically** even at `--z3rlimit 800
+--fuel 16`: the `v :: tl` branch spins (SMT cannot chain the trailing decoder's
+unfold through the non-trailing encoder's `let rec`, and — further — the
+generic lemma is FALSE for a `pure ()` separator, where `sep.dec empty = Inr
+((),0)` and the trailing decoder DOES whole-consume; it only holds for separators
+that reject empty input, e.g. `byte_val 0x2Euy` where `sep.dec empty = Inl`).
+
+**What this means for consumers (DNS):** prove the TWO codec-level roundtrips
+separately (`sep_by1.roundtrip` for non-FQ, `sep_by1_trailing.roundtrip` for FQ)
+plus the ROOT case, and do NOT attempt a single `decode_domain` roundtrip lemma
+that must disambiguate — that fact is the §47 wall.  Concrete FQ ENCODE vectors
+(`www.` → 4 bytes) prove via `Seq.lemma_eq_intro`; the general FQ **decode**
+roundtrip through the disambiguating wrapper is unproven (document it).  If a
+single-codec roundtrip is ever required, the honest route is a TAGGED sum
+(`sum`/`alt`) encoding the flag, NOT an untagged trailing-dot suffix.
+
+### Key gotcha
+
+`sep_by1_trailing_wfcv` is a `bool` — do NOT fold `sep.wfcv_prop ()` (a `prop`)
+into it (Error 34 `Tot`/`GTot` mismatch); `wfcv_prop` goes only in
+`sep_by1_trailing_wfcv_prop` (which returns `prop`).
