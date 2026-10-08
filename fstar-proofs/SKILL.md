@@ -5537,6 +5537,17 @@ the end" off-by-one (i reaches 8, then 9) AND the product bound
   distribute over `_linear_a`), then `clmul a b = clmul b a` via `lemma_grid_swap`.
   Do NOT try to prove symmetry directly on `raw_mul`'s doubling recursion.
 
+**Verified technique for the remaining bits (tested in isolation this session, to
+land next):**
+- `bits_xor a n = XOR_{i<n} bit_i(a)·2^i` recovers `a` for `a < 2^n`.  The bridge
+  sum↔XOR is disjointness: `xor16 x (b·2^k) = x + b·2^k` for `x < 2^k, b ∈ {0,1}`,
+  and the two fiddly helpers are `lemma_bit_low a k : bit a k = bit (a % 2^{k+1}) k`
+  and `lemma_xor_disjoint_high x b k` (induction on k).  These are the bit-index
+  lemmas where a session-fatigued `admit` was slipped in — prove each 0-admit in
+  isolation, do NOT skip them.
+- `clmul a b = dsum a b` chains `clmul`'s own set-bit form, the bit-decompose of
+  `a`, and a reindex `(i,k)↔(i,j)`; `clmul`-sym then falls out of `lemma_grid_swap`.
+
 ## 84. Reversed-Accumulator Decoder Roundtrip — the `rev_involutive`/`append_l_cons`/`append_assoc`/`rev_rev'` Bridge
 
 > **⚠ SCOPE-REVISED (2026-10-04): the "no generic codec roundtrip" framing is
