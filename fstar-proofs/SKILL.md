@@ -5548,6 +5548,62 @@ land next):**
 - `clmul a b = dsum a b` chains `clmul`'s own set-bit form, the bit-decompose of
   `a`, and a reindex `(i,k)↔(i,j)`; `clmul`-sym then falls out of `lemma_grid_swap`.
 
+**✅ SYMMETRY LANDED 0-admit (2026-10-07, fstar-image `543a711`+`70c6839`+
+`8b2dad5`).**  `lemma_clmul_sym a b : clmul a b = clmul b a` is proven at the
+coeffcient level via index transposition.  The bit-decomposition tower and the
+`clmul = dsum` bridge are all 0-admit under `fstar.exe --z3rlimit 500`.  Landed
+lemmas (see tasks.md §6b items 2a/2b/2c for the full list):
+- **Bit decomposition (2a):** `bits_xor`/`bits_sum`, `lemma_bit_low`,
+  `lemma_xor_disjoint`/`_high`, `lemma_bits_sum_mod`/`_recover`/`_bounded`,
+  `lemma_bits_xor_eq_sum`/`lemma_bits_xor_recover`.
+- **clmul = dsum (2b):** `lemma_pow2_pos_add`, `lemma_nat_xor_shl`/`lemma_xor16_shl`
+  (shift-distributes-over-XOR), `shl_bits`, `lemma_shl_bits_eq_mul`/
+  `lemma_mul_eq_shl_bits`, `fold_xor` + `lemma_fold_xor_scale`, `lemma_xor_scale2`,
+  `clmul_grid`, `lemma_fold_col_clmul`/`lemma_col_g`, `lemma_pow2_eq_pow2_pos`,
+  `lemma_xor_zero16`/`lemma_grid_t_clmul_bounded`, `lemma_clmul_go_grid_t`,
+  then `lemma_clmul_dsum`.
+- **Symmetry (2c):** `lemma_col_transpose`/`lemma_grid_t_transpose`/
+  `lemma_grid_transpose`, `lemma_clmul_grid_swap`, `lemma_fold_row_ext`/
+  `lemma_grid_ext` (fold extensionality), `lemma_dsum_sym`, then `lemma_clmul_sym`.
+
+**⚠ GOTCHAS THAT COST A SESSION (record each, do NOT re-derive):**
+1. **`pow2`/`pow2_pos` name duplication.**  Two structurally-identical
+   `let rec pow2` / `let rec pow2_pos` are NOT unified by SMT (`pow2 5` and
+   `pow2_pos 5` normalize to the same numeral, but symbolic `pow2 k` vs
+   `pow2_pos k` are distinct).  Every mixed use needs a bridge
+   `lemma_pow2_eq_pow2_pos k : pow2 k = pow2_pos k` (induction), and applies it
+   before the SMT goal that mixes them.  Prefer ONE name in new code.
+2. **Fold recursion ORDER mismatch.**  `fold_xor f n` recurses `f (n-1) ⊕ fold f (n-1)`,
+   while `shl_bits` recurses `fold ⊕ term` — same result, different operand
+   ORDER.  SMT will NOT match them; bridge with `lemma_xor_comm` (induction),
+   don't `assert` the literal equality of two differently-ordered recursive folds.
+3. **Scaling a bit out of an XOR-fold needs a BOOLEAN case-split.**
+   `XOR_i (b · f i) = b · XOR_i f i` for `b ∈ {0,1}` is `lemma_xor_scale2` /
+   `lemma_fold_xor_scale` (case on `b=0`/`b=1` via `lemma_xor_00`).  AND factor the
+   bit FIRST + PARENTHESISE it in the grid definition
+   (`clmul_grid a b i j = bit b j * (bit a i * pow2_pos (i+j))`, not
+   `bit a i * bit b j * …`) or the pointwise lambda will NOT delta-reduce against
+   the fold body — nat `*` is left-assoc and SMT won't reassociate `(bc·x)·y` to
+   `bc·(x·y)` inside a lambda.
+4. **Pointwise function equality across distinct lambdas does NOT delta-reduce.**
+   `grid_sum (λ i j. f j i)` vs `grid_sum (λ i j. g i j)` are unequal to SMT even
+   when `f j i = g i j` pointwise.  Use `FStar.Classical.forall_intro_2 (lemma_swap a b)`
+   to forge the `forall i j. …` hypothesis, then a fold-EXTENSIONALITY lemma
+   (`lemma_fold_row_ext` / `lemma_grid_ext` → `lemma_grid_transpose`) — NOT a bare
+   `assert` of the lambda equality.  (`lemma_grid_sum_ext` naively deleted: it
+   inducts on the WRONG axis of `grid_sum f n m = grid f m n` — `grid f m n` recurses
+   on `n`, not `m`.)
+5. **`lemma_xor_zero16 x : xor16 0 x = x` needs `x < 2^16`** — carry the bound via
+   `lemma_xor_bounded`/`lemma_grid_t_clmul_bounded`; a bare `xor16 0 X = X` for
+   symbolic `X` does not discharge (unlike `X ⊕ 0 = X`, which is `lemma_xor_zero X 16`).
+   Watch the operand ORDER: the 0 is on the LEFT in `xor16 0 X`.
+
+**NEXT (the only genuinely hard fact left): item 4 `lemma_reduce_hom` — see**
+the polynomial-substitution rewrite plan in tasks.md §6b item 4.  The bit-indexed
+`reduce_from` fold is still the §83 wall (unfolding `reduce_from c 14` for
+symbolic `c` spins); REWRITE `reduce` as a monomial-list substitution `x⁸ ↦
+x⁴+x³+x²+1`, not a bit-position case-fold.
+
 ## 84. Reversed-Accumulator Decoder Roundtrip — the `rev_involutive`/`append_l_cons`/`append_assoc`/`rev_rev'` Bridge
 
 > **⚠ SCOPE-REVISED (2026-10-04): the "no generic codec roundtrip" framing is
