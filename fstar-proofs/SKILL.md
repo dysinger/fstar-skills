@@ -876,6 +876,25 @@ Key points:
   `word32be`/`word32le`) has NOT been raised — the pointwise `ensures` is what
   makes 16 writes tractable, not a higher write count per se.
 
+### ⚠ Pointwise `ensures` does NOT extend to VARIABLE-LENGTH copies — use a `while` loop invariant
+
+**Forward lesson (2026-10-08, planned for fstar-dns 11.7 — NOT yet proven; do
+not treat as verified).**  The pointwise-`ensures` pattern above makes a FIXED
+write count (≤16) tractable because each `Seq.index s1 (off+N) == bN` conjunct is
+an independent write-and-read-back that SMT discharges against the bounded
+`Seq.upd` chain.  This breaks the moment the write count is DATA-DEPENDENT: a
+`1..63`-octet variable-length DNS label copy cannot enumerate the conjuncts.
+
+A genuinely variable-length copy/encode must instead be a Pulse `while` loop
+(`Pulse.Lib.Stick`/`Pulse.Lib.Array` `while`) whose invariant carries (1) the
+`pts_to` frame for the buffer, (2) a `len`-progress measure (`i < U32.v len`) for
+termination, and (3) a "bytes written so far + bytes outside `[off, off+len+2)`
+untouched" framing fact.  The roundtrip lemma for such a loop is the hard part
+(the fixed-16 UUID roundtrip was easy precisely because there was no loop).
+
+Leave this as an OPEN research note until the 11.7 wire-form loop actually
+verifies 0-admit; do not enshrine a loop-invariant recipe as "done".
+
 ---
 
 ## 19. Open-Order Fragility — Export Behavior Across Module Boundaries
