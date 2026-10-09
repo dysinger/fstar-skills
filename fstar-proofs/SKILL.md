@@ -5047,6 +5047,40 @@ the full `grep -nE '^let |^fn '` set, not just `lemma_*`.**  The precise
 enumeration in §9 (`comm` of the `_lemma_` sets) is NECESSARY but NOT SUFFICIENT:
 it catches lemmas only.
 
+#### (a′) The parity-check itself has TWO false-positive traps (fstar-image, 2026-10-09)
+
+When re-establishing anchor parity after an adversarial review found a **false
+"100% coverage" claim** (88 public lemmas unanchored), the automated diff must
+account for two name-matching subtleties, or it under/over-counts:
+
+1. **Qualified anchor names split the bare-name grep.**  The integration test
+   anchors same-named lemmas from DIFFERENT modules via a module prefix — e.g.
+   `let _filter_lemma_take_all = Data.Image.PNG.Filter.lemma_take_all` and
+   `let _deflate_lemma_take_all = Data.Image.PNG.Deflate.lemma_take_all` (also
+   `Data.Image.Pulse.lemma_tag_roundtrip` × 3).  A naive
+   `grep -oE 'let _[a-z0-9_]+ = [A-Za-z_][A-Za-z0-9_]*'` + `sed 's/.* = //'`
+   only extracts the BARE name, so `lemma_take_all` looks unanchored even though
+   it IS anchored (qualified).  **Fix: strip the module prefix with
+   `sed -E 's/.*\.//'` on the extracted RHS before `comm`.**
+2. **Mutual-rec `and`-bound lemmas are invisible to a `^let` grep.**  F* allows
+   `let rec b0 … and lemma_b1_length … and lemma_b2_length …` — the `and`-bound
+   lemmas are public and anchorable, but `grep '^let'` misses them.  **Enumerate
+   src lemmas with `grep -rhoE '^(let|and) (rec )?lemma_…'`, not `^let`.**
+
+The correct full check (0 = parity restored):
+
+```bash
+grep -rhoE '^(let|and) (rec )?(lemma_[a-zA-Z0-9_]+)\b' src/ \
+  | grep -oE 'lemma_[a-zA-Z0-9_]+' | sort -u > src.txt
+grep -oE 'let _[a-zA-Z0-9_]+ = [A-Za-z_.][A-Za-z0-9_.]*' test/…/Integration.fst \
+  | sed -E 's/.* = //' | sed -E 's/.*\.//' | sort -u > anchored.txt
+comm -23 src.txt anchored.txt   # must be EMPTY
+```
+
+**Lesson:** a "mechanically-enforced coverage" claim is only as good as the
+*mechanics* — the diff must handle qualified anchors AND `and`-bound names, or it
+silently over-reports (false "gap") or under-reports (true gap).
+
 ### (b) A "dead" `None` variant of a decode-result sum can be LOAD-BEARING for extraction
 
 `Network.MIME.Pulse` had `opt_content_type = OCO_None | OCO_Some of
