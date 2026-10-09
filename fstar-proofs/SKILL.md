@@ -5661,6 +5661,13 @@ BIT-LINEAR map, not a descending case-fold.
    `lemma_pow2_eq_pow2_pos k` + `assert_norm (pow2 8 = 256)` to bridge, and
    keep `ensures` on the SAME one (`pow2 8` vs `pow2_pos 8`) that the next
    lemma's `requires` uses, else the IH won't thread.
+5. **`lemma_xor_zero a bits` needs `a < pow2 bits` — and for a LITERAL `a` like
+   `29`, `29 < pow2 16` does NOT discharge unless you `assert_norm (pow2 16 =
+   65536)` first.**  Hit this landing `lemma_subst_hi_double`/`lemma_reduce_sub_double`
+   (`a2460f1`): calling `lemma_xor_zero 29 16` failed with `Failed to prove: 29 <
+   pow2 16` because `pow2 16` was not normalized.  Add the `assert_norm` in the
+   lemma body before the call.  (Same applies to `n_sub < pow2 16` via
+   `assert_norm (n_sub = 29)`.)
 
 **NEXT (item 4b + field assembly):** the MULTIPLICATIVE half
 `reduce_sub (clmul x y) = reduce_sub (clmul x (reduce_sub y))` + the bridge
@@ -5670,24 +5677,36 @@ facts.  With additivity + clmul_sym + clmul bilinearity landed, comm and distrib
 fall out of the bridge + `lemma_xor_16_eq_8`; assoc/inverse/exp-log need the
 multiplicative hom.
 
-**📋 NEXT-SESSION PLAN (2026-10-07, locked after item 4a landed `e748224`):**
+**📋 NEXT-SESSION PLAN (2026-10-07, locked after item 4a landed `e748224`;
+REVISED 2026-10-08 after step 1 landed `a2460f1`):**
 in EXACT order, each 0-admit under the dev-loop guard `fstar.exe --z3rlimit 500`
 (NO `admit()` in scratch):
 
-1. **`lemma_reduce_sub_double a : reduce_sub (2*a) = red a`** for `a < 256` —
-   the stepping-stone bridge atom (scoped this session: the `a < 128` branch is
-   `lemma_subst_id (2a)`; the `a >= 128` branch needs a helper
-   `lemma_subst_hi_double : 128 <= a < 256 ⟹ subst_hi (2a) 8 = 0x1D` — prove it
-   by induction on `subst_hi`, using `bit (2a) 8 = 1` (since `256 <= 2a < 512`,
-   `2a/256 = 1`) and `bit (2a) (8+j) = 0` for `j >= 1` (since `2a < 2^9`, use
-   `lemma_bit_zero` + `FStar.Math.Lemmas.small_div`).  Then `reduce_sub (2a) =
-   xor16 lo 0x1D = xor8 lo 29` via `lemma_xor_16_eq_8`, and `red a =
+1. **✅ `lemma_reduce_sub_double a : reduce_sub (2*a) = red a`** for `a < 256` —
+   **LANDED 0-admit (fstar-image `a2460f1`, 2026-10-08).**  The `a < 128` branch
+   is `lemma_subst_id (2a)` + `lemma_reduce_sub_id`; the `a >= 128` branch uses a
+   new helper `lemma_subst_hi_double a m : subst_hi (2a) m = n_sub`
+   (128 <= a < 256, 1 <= m <= 8).  PROOF SHAPE (verified): doubling a byte toggles
+   bit 7 → bit 8 (so `2a` has bit 8 set, bits 9..15 clear), so the XOR-fold
+   collapses to the sole `bit 8 = 1` term `1·(2^0·0x1D)`.  Induct on `m`; at each
+   `j = m-1 >= 1` step use `lemma_bit_zero c (8+j)` (needs `c < pow2_pos (8+j)`,
+   from `c < 512 = pow2_pos 9 <= pow2_pos (8+j)` via `lemma_pow2_pos_mono 9 (8+j)`);
+   the `m = 1` base needs `assert_norm (pow2 16 = 65536)` to discharge the
+   `lemma_xor_zero 29 16` width bound (`29 < pow2 16`).  Then `bits_xor (2a) 8 =
+   (2a)%256` (via `lemma_bits_xor_eq_sum` + `lemma_bits_sum_mod`) → low byte `lo` →
+   `xor16 lo 29 = xor8 lo 29` (`lemma_xor_16_eq_8`) → already-reduced byte; `red a =
    xor8 (2a) 0x11D = xor8 lo 29` via `lemma_xor_trunc_both 8 lo 29`.
-2. **The bridge** `gf_mul_go p a b = xor8 p (reduce_sub (raw_mul a b))` —
-   induct on `b`, aligning `gf_mul_go`'s `red a` step with `lemma_reduce_sub_double`
-   and `raw_mul_go`'s `a*2` step.  (Or bridge through `clmul` if `raw_mul = clmul`
-   lands first; the `raw_mul` route is structurally easier since `gf_mul_go` and
-   `raw_mul_go` have identical bodies except `red a` vs `a*2`.)
+2. **⛔ The bridge `gf_mul_go p a b = xor8 p (reduce_sub (raw_mul a b))` is NOT
+   structurally free — it NEEDS the DOUBLING-COMMUTATION (a fragment of 4b).**
+   The naive "identical bodies except `red a` vs `a*2`" induction stalls: its step
+   obligation `reduce_sub (raw_mul_go p' (2a) (b/2)) = xor8 p' (reduce_sub (raw_mul_go 0
+   (reduce_sub (2a)) (b/2)))` needs `reduce_sub (2x) = reduce_sub (2·reduce_sub x)`
+   for `2x < 2^16`.  Since `clmul x 2 = 2x` and `reduce_sub 2 = 2`, that is EXACTLY
+   the `y = 2` case of the multiplicative hom 4b
+   `reduce_sub (clmul x y) = reduce_sub (clmul x (reduce_sub y))`.
+   **ACTION: prove the doubling-commutation atom FIRST (it is both the bridge's
+   unblocker and 4b's crux), then the bridge is a clean induction on `b` via
+   `lemma_gf_mul_go_linear` + `lemma_reduce_sub_double`.**
 3. **`raw_mul a b = clmul a b`** (or prove comm/distrib on whichever side is easier
    first) — the Russian-peasant vs position-indexed equivalence.
 4. **Assembly — comm + distrib (NO multiplicativity needed):**
@@ -5696,10 +5715,22 @@ in EXACT order, each 0-admit under the dev-loop guard `fstar.exe --z3rlimit 500`
    + `lemma_xor_16_eq_8`.  Both are FREE once the bridge lands.
 5. **Multiplicative hom (4b)** `reduce_sub (clmul x y) = reduce_sub (clmul x (reduce_sub y))`
    → `lemma_gf_mul_assoc` (the genuinely hard half, chains clmul associativity +
-   the hom).
+   the hom).  **Its collapsing sub-case `reduce_sub (2x) = reduce_sub (2·reduce_sub x)`
+   is the atom from step 2 — land it there and reuse it here.**
 6. **Inverse (6.5)** `FStar.Math.Fermat.fermat_alt` + order-255 cyclicity;
    **exp/log (6.6)** 255-element group consistency.  Then 6.8 (0-admit green) +
    Phase 12 (rewire the stale `default.nix`/`Makefile`).
+
+**⭐ DOUBLING-COMMUTATION ATOM (the next unblocker, NOT YET TRIED — do not
+overclaim):** `reduce_sub (2x) = reduce_sub (2·reduce_sub x)` for `2x < 2^16`
+(i.e. `x < 2^15`).  Equivalently at the byte level, for the 8 doubling terms of
+`raw_mul`/`gf_mul_go`: `red^k a = reduce_sub (2^k a)` for `k <= 7`, `a < 256`
+(`2^k a < 2^16` throughout, so each term is in `reduce_sub`'s `<2^16` domain).
+Candidate route: `reduce_sub (2x)` vs `reduce_sub (2·reduce_sub x)` — write
+`2x = 2·(2^k a) = 2^{k+1} a` and use `lemma_reduce_sub_double` at the INNER level
+plus `reduce_sub` idempotence (`lemma_reduce_sub_id`, since `reduce_sub x < 256`).
+STOP-and-record if the `2x` (unreduced) vs `2·reduce_sub x` (reduced) argument
+mismatch will not thread; do NOT leave an `admit()`.
 
 ## 84. Reversed-Accumulator Decoder Roundtrip — the `rev_involutive`/`append_l_cons`/`append_assoc`/`rev_rev'` Bridge
 
