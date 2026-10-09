@@ -5623,6 +5623,84 @@ the polynomial-substitution rewrite plan in tasks.md §6b item 4.  The bit-index
 symbolic `c` spins); REWRITE `reduce` as a monomial-list substitution `x⁸ ↦
 x⁴+x³+x²+1`, not a bit-position case-fold.
 
+**✅ ITEM 4a LANDED 0-admit (2026-10-07, fstar-image `e748224`) — the ADDITIVITY
+half of the reduce hom is CRACKED via polynomial substitution.**  The bit-indexed
+`reduce_from` descending fold was the §83 wall because unfolding it for symbolic
+`c = xor16 x y` spins SMT.  The fix is EXACTLY the plan: define `reduce` as a
+BIT-LINEAR map, not a descending case-fold.
+
+- **`subst c = xor16 (bits_xor c 8) (subst_hi c 8)`** — one round of the
+  quotient substitution `x⁸ ↦ x⁴+x³+x²+1` (= `n_sub = 0x1D`, the non-leading
+  part of 0x11D).  `bits_xor c 8` keeps the low byte; `subst_hi c 8 =
+  XOR_{j<8} bit_{8+j}(c) · (2^j·0x1D)` substitutes the high half.  Each half
+  is an XOR-fold of bit-scaled monomials, hence LINEAR.
+- **`reduce_sub = subst ∘ subst`** (two rounds drop degree 15→11→7).
+- **Additivity proofs** (all 0-admit, `--z3rlimit 500`):
+  `lemma_bit_xor_scale` (two-term `xor16 (bit x k·cst)(bit y k·cst) = (bit x k + bit y k)%2·cst`,
+  a Boolean case-split on the two bits — SAME select-atom trick as §83),
+  then `lemma_subst_hi_xor` / `lemma_bits_xor_xor` (the fold distributes over
+  XOR via `lemma_nat_xor_bit` + `lemma_bit_xor_scale` + `lemma_xor16_middle`),
+  then `lemma_subst_xor`, then **`lemma_reduce_sub_xor : reduce_sub (xor16 x y) =
+  xor16 (reduce_sub x)(reduce_sub y)`** — THE additivity of the reduction.
+- **Bounds/correctness** (0-admit): `lemma_subst_hi_bound(_tight)` /
+  `lemma_subst_bound` (subst c < 2^12) / `lemma_subst_lt256` (c<2^12 ⟹ subst c < 2^8)
+  / `lemma_reduce_sub_bounded` (reduce_sub c < 256) / `lemma_subst_id` +
+  `lemma_subst_hi_zero` + `lemma_reduce_sub_id` (reduce_sub c = c for c < 256).
+
+**KEY GOTCHAS (each cost real time, do NOT re-derive):**
+1. **`M` (single uppercase) and `by` are RESERVED identifiers in F* v2026.09.20.**
+   `(x y k M: nat)` → syntax error; `let by = ...` → syntax error (tactic `by`).
+   Use `cst`/`bxv`/`byv`. (Uppercase single letters are effect/meta identifiers.)
+2. **`FStar.Math.Lemmas.pow2` is `Prims.pow2`, a THIRD power-of-2** distinct from
+   GF256's `let rec pow2` and `pow2_pos`.  `lemma_div_lt c k k`'s precondition
+   `c < pow2 k` does NOT unify with `c < pow2_pos k`; instead use
+   `FStar.Math.Lemmas.small_div c (pow2_pos k)` (gives `c/2^k = 0` directly).
+3. **XOR fold operand-order** still bites (`subst_hi` recurses `fold XOR term`);
+   bridge with `lemma_xor16_middle` not a bare `assert` (same as §83 fold order).
+4. **The `pow2`/`pow2_pos` names still collide throughout the bounds** — use
+   `lemma_pow2_eq_pow2_pos k` + `assert_norm (pow2 8 = 256)` to bridge, and
+   keep `ensures` on the SAME one (`pow2 8` vs `pow2_pos 8`) that the next
+   lemma's `requires` uses, else the IH won't thread.
+
+**NEXT (item 4b + field assembly):** the MULTIPLICATIVE half
+`reduce_sub (clmul x y) = reduce_sub (clmul x (reduce_sub y))` + the bridge
+`gf_mul_go p a b = xor8 p (reduce_sub (clmul a b))` (= the reduction-commutes-
+with-accumulation fact: `red`-per-step == reduce-at-end) are the remaining hard
+facts.  With additivity + clmul_sym + clmul bilinearity landed, comm and distrib
+fall out of the bridge + `lemma_xor_16_eq_8`; assoc/inverse/exp-log need the
+multiplicative hom.
+
+**📋 NEXT-SESSION PLAN (2026-10-07, locked after item 4a landed `e748224`):**
+in EXACT order, each 0-admit under the dev-loop guard `fstar.exe --z3rlimit 500`
+(NO `admit()` in scratch):
+
+1. **`lemma_reduce_sub_double a : reduce_sub (2*a) = red a`** for `a < 256` —
+   the stepping-stone bridge atom (scoped this session: the `a < 128` branch is
+   `lemma_subst_id (2a)`; the `a >= 128` branch needs a helper
+   `lemma_subst_hi_double : 128 <= a < 256 ⟹ subst_hi (2a) 8 = 0x1D` — prove it
+   by induction on `subst_hi`, using `bit (2a) 8 = 1` (since `256 <= 2a < 512`,
+   `2a/256 = 1`) and `bit (2a) (8+j) = 0` for `j >= 1` (since `2a < 2^9`, use
+   `lemma_bit_zero` + `FStar.Math.Lemmas.small_div`).  Then `reduce_sub (2a) =
+   xor16 lo 0x1D = xor8 lo 29` via `lemma_xor_16_eq_8`, and `red a =
+   xor8 (2a) 0x11D = xor8 lo 29` via `lemma_xor_trunc_both 8 lo 29`.
+2. **The bridge** `gf_mul_go p a b = xor8 p (reduce_sub (raw_mul a b))` —
+   induct on `b`, aligning `gf_mul_go`'s `red a` step with `lemma_reduce_sub_double`
+   and `raw_mul_go`'s `a*2` step.  (Or bridge through `clmul` if `raw_mul = clmul`
+   lands first; the `raw_mul` route is structurally easier since `gf_mul_go` and
+   `raw_mul_go` have identical bodies except `red a` vs `a*2`.)
+3. **`raw_mul a b = clmul a b`** (or prove comm/distrib on whichever side is easier
+   first) — the Russian-peasant vs position-indexed equivalence.
+4. **Assembly — comm + distrib (NO multiplicativity needed):**
+   `lemma_gf_mul_comm a b` = bridge + `lemma_clmul_sym`; `lemma_gf_mul_distrib`
+   = bridge + clmul bilinearity (`lemma_raw_mul_go_bilinear`) + `lemma_reduce_sub_xor`
+   + `lemma_xor_16_eq_8`.  Both are FREE once the bridge lands.
+5. **Multiplicative hom (4b)** `reduce_sub (clmul x y) = reduce_sub (clmul x (reduce_sub y))`
+   → `lemma_gf_mul_assoc` (the genuinely hard half, chains clmul associativity +
+   the hom).
+6. **Inverse (6.5)** `FStar.Math.Fermat.fermat_alt` + order-255 cyclicity;
+   **exp/log (6.6)** 255-element group consistency.  Then 6.8 (0-admit green) +
+   Phase 12 (rewire the stale `default.nix`/`Makefile`).
+
 ## 84. Reversed-Accumulator Decoder Roundtrip — the `rev_involutive`/`append_l_cons`/`append_assoc`/`rev_rev'` Bridge
 
 > **⚠ SCOPE-REVISED (2026-10-04): the "no generic codec roundtrip" framing is
