@@ -876,24 +876,69 @@ Key points:
   `word32be`/`word32le`) has NOT been raised — the pointwise `ensures` is what
   makes 16 writes tractable, not a higher write count per se.
 
-### ⚠ Pointwise `ensures` does NOT extend to VARIABLE-LENGTH copies — use a `while` loop invariant
+### ✅ Pointwise `ensures` DOES extend to VARIABLE-LENGTH copies — the `while`-loop recipe (verified 0-admit, fstar-dns 11.7)
 
-**Forward lesson (2026-10-08, planned for fstar-dns 11.7 — NOT yet proven; do
-not treat as verified).**  The pointwise-`ensures` pattern above makes a FIXED
-write count (≤16) tractable because each `Seq.index s1 (off+N) == bN` conjunct is
-an independent write-and-read-back that SMT discharges against the bounded
-`Seq.upd` chain.  This breaks the moment the write count is DATA-DEPENDENT: a
-`1..63`-octet variable-length DNS label copy cannot enumerate the conjuncts.
+**Verified 2026-10-09 (`fstar-dns` `0b36be6`):** the pointwise-`ensures` pattern
+*does* extend to variable-length copies, but ONLY if every conjunct — including
+the "bytes outside the write window are preserved" framing — is stated
+**POINTWISE** (`forall j. Seq.index … == …`), never via `Seq.slice`.
 
-A genuinely variable-length copy/encode must instead be a Pulse `while` loop
-(`Pulse.Lib.Stick`/`Pulse.Lib.Array` `while`) whose invariant carries (1) the
-`pts_to` frame for the buffer, (2) a `len`-progress measure (`i < U32.v len`) for
-termination, and (3) a "bytes written so far + bytes outside `[off, off+len+2)`
-untouched" framing fact.  The roundtrip lemma for such a loop is the hard part
-(the fixed-16 UUID roundtrip was easy precisely because there was no loop).
+The `1..63`-octet DNS label wire-form copy (`encode_label (src,len,dst,off)`
+writing `<length byte><1..63 octets><0x00>`) verifies 0-admit with this recipe:
 
-Leave this as an OPEN research note until the 11.7 wire-form loop actually
-verifies 0-admit; do not enshrine a loop-invariant recipe as "done".
+```fstar
+fn encode_label (src len dst off)
+  (#src0 #dst0: erased (Seq.seq U8.t))
+  requires A.pts_to src src0 ** A.pts_to dst dst0 **
+           pure (1 <= U32.v len && U32.v len <= 63 &&
+                 U32.v len <= A.length src &&
+                 U32.v off + U32.v len + 2 <= A.length dst &&
+                 U32.v off + U32.v len + 1 < u32_max && U32.v len + 2 < u32_max)
+  returns w: U32.t
+  ensures A.pts_to src src0 **
+    (exists* (s1). A.pts_to dst s1 ** pure (
+      Seq.length s1 == A.length dst /\ Seq.length dst0 == A.length dst /\
+      Seq.index s1 (off) == uint32_to_uint8 len /\
+      (forall j. j < len ==> Seq.index s1 (off+1+j) == Seq.index src0 j) /\
+      Seq.index s1 (off+1+len) == root_byte /\
+      (forall j. j < off ==> Seq.index s1 j == Seq.index dst0 j) /\
+      (forall j. off+len+2 <= j && j < length ==> Seq.index s1 j == Seq.index dst0 j))) **
+    pure (w == U32.add_mod len 2ul)
+= let joff = US.uint32_to_sizet off in
+  dst.(joff) <- uint32_to_uint8 len;  (* length byte *)
+  let mut i : US.t = 0sz;
+  while (US.lt !i (US.uint32_to_sizet len))
+    invariant exists* (vi s). pts_to i vi ** A.pts_to src src0 ** A.pts_to dst s **
+      pure (US.v vi <= len /\ 1 <= len && len <= 63 /\
+            Seq.length s == A.length dst /\ Seq.length dst0 == A.length dst /\
+            Seq.index s off == uint32_to_uint8 len /\
+            (forall j. j < US.v vi ==> Seq.index s (off+1+j) == Seq.index src0 j) /\
+            (forall j. j < off ==> Seq.index s j == Seq.index dst0 j) /\
+            (forall j. off+len+2 <= j && j < length ==> Seq.index s j == Seq.index dst0 j))
+    decreases (U32.v len - US.v !i)
+  { let vi = !i; dst.(US.add (US.add joff 1sz) vi) <- src.(vi); i := US.add vi 1sz };
+  dst.(US.add (US.add joff 1sz) (US.uint32_to_sizet len)) <- root_byte;  (* terminator *)
+  U32.add_mod len 2ul
+```
+
+The **why is it pointwise, not slice-equal:** a `Seq.upd` write at one index is
+what `dst.(j) <- x` produces, and SMT can discharge a `forall j. index … == …`
+against a one-index `Seq.upd` (the Nth conjunct is exactly the Nth write-and-
+read-back); it CANNOT re-establish a `Seq.slice s … == …` after a write because
+slice equality doesn't reduce through `Seq.upd`.
+
+**Extraction rules (Error 368) that bite here:**
+1. **Never `U8.v`/`U32.v`/nat `+` in an extracted body** — `Prims.int` has no C
+   repr.  Use `FStar.Int.Cast.uint32_to_uint8`/`uint8_to_uint32` (become C casts)
+   and `SizeT` arithmetic (`US.add`, never `U32.uint_to_t (U32.v off + 1 + vi)`).
+2. **`U32.add` in a spec needs `fits (v+2) 32` in scope**; `U32.add_mod`
+   (wraps) sidesteps the obligation (fine here since `len ≤ 63`).
+3. **The `decreases` clause dereferences the counter** (`US.v !i`), not `i`
+   (the ref).
+4. **Do NOT mix `invariant live i` with a `pts_to i vi` inside `exists*`** —
+   double ownership; pick ONE (the `memcpy_l` single-`exists*` form is cleanest).
+5. **Cast roundtrip** `uint8_to_uint32 (uint32_to_uint8 x) == x` (for `x < 256`)
+   needs a `noextract` `[SMTPat …]` lemma — SMT won't chain the two casts.
 
 ---
 
