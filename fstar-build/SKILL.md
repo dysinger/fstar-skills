@@ -286,8 +286,85 @@ OCaml modules must be compiled in dependency order. Compile leaf modules before 
 
 ---
 
-## 7. Profile-Guided Z3 Resource Limits
+---
 
+### Multiple Pulse/Custard leaves — one root file + `--custard_entry` transitive close (verified fstar-image 2026-10-10)
+
+A package with **multiple INDEPENDENT Pulse leaves** (e.g. `Data.Image.Pulse`,
+`Data.Image.PNG.Pulse`, `Data.Image.QRCode.Pulse` — three enum-tag dispatchers
+that do NOT `open`/`include` each other) cannot be extracted by listing all
+three `.fst` files in ONE `--codegen Custard` invocation — `fstar.exe` fails with
+**"Error 10: When using --ext fly_deps, only one file can be provided"**.  Nor can
+you loop `for m in …; do … --odir $out src/$m.fst` — each iteration re-emits the
+SAME `Custard.c`/`Custard.ml`/`Custard.fsproj` into `$out`, so only the LAST leaf
+survives and the library silently drops the others (the `cc`/`dotnet build` still
+succeeds on the partial `Custard.c` — a **silent-empty-artifact class bug**, same
+family as the `grep '\.Low\.'` trap above).
+
+**Correct pattern (single root file + entry flags, mirroring fstar-ip):**
+
+```nix
+# verify ALL leaves first (dependency order) so their .checked land in cache
+for m in Data.Image.Pulse Data.Image.PNG.Pulse Data.Image.QRCode.Pulse; do
+  ${fstar-exe} $PULSE_INCS --already_cached … --z3rlimit 120 \
+    --cache_checked_modules --cache_dir cache --odir cache src/$m.fst || exit 1
+done
+# THEN one custard invocation rooted at ONE file, with ALL entry flags;
+# the other leaves resolve from cache via --include cache.
+${fstar-exe} $PULSE_INCS --include cache --already_cached … \
+  --codegen Custard --custard_backend C --custard_monomorphize_types true \
+  --custard_entry Data.Image.Pulse.encode_img_fmt \
+  --custard_entry Data.Image.Pulse.decode_img_fmt \
+  --custard_entry Data.Image.PNG.Pulse.encode_png_chunk \
+  --custard_entry Data.Image.PNG.Pulse.decode_png_chunk \
+  --custard_entry Data.Image.QRCode.Pulse.encode_qr_mode \
+  --custard_entry Data.Image.QRCode.Pulse.decode_qr_mode \
+  --odir $out src/Data.Image.Pulse.fst || exit 1
+```
+
+`--custard_entry M.f` pulls in the TRANSITIVE closure of `M` from the
+`--include cache` `.checked` set, so the single root file links all three leaves
+into one `Custard.c`.  The `#.checked`/`#.native`/`#.fsharp`/`#.ocaml` targets all
+use this single-root form.
+
+**OCaml `dune` module list must NOT include the Pulse leaves.**  Custard folds
+all leaves into ONE `Custard` module (no per-leaf `Data_Image_Pulse.ml`), so:
+
+```nix
+ocaml-modules =
+  (map (m: builtins.replaceStrings [ "." ] [ "_" ] m) pure-modules)  (* the --codegen OCaml leaves *)
+  ++ [ "Data_Codec_Types"; "Data_Codec" ]  (* + the codec pure spec *);
+# and the dune `(modules … Custard)` — Custard, NOT the pulse-modules.
+```
+
+Listing `Data_Image_Pulse`/`Data_Image_PNG_Pulse`/`Data_Image_QRCode_Pulse` in
+`modules` fails dune with **"Module Data_Image_QRCode_Pulse doesn't exist"**
+(only `Custard` is emitted).
+
+### `make check` (dev loop) ≠ `nix build .#ocaml` — cross-module inlining is STRICTER
+
+A lemma that discharges 0-admit under `make check`'s `--z3rlimit 120` can FAIL in
+the `.#ocaml` derivation's `--codegen OCaml` pass (which uses cross-module
+inlining — `--include cache` makes F* unfold callees from other modules).  The
+ocaml-src `buildPhase` in `default.nix` verifies pure modules WITHOUT `--z3rlimit`
+by default; a scanline/roundtrip lemma that SMT proved at rlimit 120 then fails
+at the default rlimit.  **Fix: mirror `make check`'s `--z3rlimit 120` in the
+pure-module verify loop of the `ocaml-src` buildPhase** (the native/fsharp loops
+already carry it).
+
+### `--codegen OCaml` requires dependency-order verification (Error 317)
+
+`--codegen OCaml` with cross-module inlining fails with **"Error 317: Cross-module
+inlining expects all modules to be checked first"** if the `pure-modules` list is
+NOT in topological order — `open`-ing a module whose `.checked` was not yet written
+(e.g. `Data.Image.QRCode.Render` listed BEFORE `Data.Image`).  `make check` may
+pass with the mis-ordered list (F* auto-resolves transitively), but `--codegen
+OCaml` is stricter.  Enumerate `pure-modules` (and `SRC_MODS` in the Makefile) in
+EXACT dependency order, leaves first.
+
+---
+
+## 7. Profile-Guided Z3 Resource Limits
 - Simple definitions: `--z3rlimit 40`
 - Moderate proofs: `--z3rlimit 80-120`
 - Complex proofs: `--z3rlimit 200-400`

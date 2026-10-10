@@ -5811,6 +5811,26 @@ plus `reduce_sub` idempotence (`lemma_reduce_sub_id`, since `reduce_sub x < 256`
 STOP-and-record if the `2x` (unreduced) vs `2·reduce_sub x` (reduced) argument
 mismatch will not thread; do NOT leave an `admit()`.
 
+**✅ CONFIRMED (2026-10-10): the `x < 256` half of the doubling-commutation is
+already provable from landed lemmas — no new atom needed.**
+`reduce_sub (2x) = reduce_sub (2·reduce_sub x)` for a BYTE `x` (`x < 256`) closes
+with `lemma_reduce_sub_id x` (gives `reduce_sub x = x`, the RHS argument is `2x`)
++ `lemma_reduce_sub_double x` (gives `reduce_sub (2x) = red x`).  The genuinely
+hard half remains `256 <= x < 2^15` (the general 16-bit operand): `2x` is a SHIFT
+(not an XOR-fold), so `lemma_reduce_sub_xor` (additivity) alone does NOT reach it
+— `2x` must be decomposed over `bits_xor`/`bits_sum` (the landed bit-decomposition
+`lemma_bits_xor_recover`/`lemma_bits_sum_recover`), then `subst`/`subst_hi` commuted
+with the shift via `lemma_xor16_double_gen` (doubling-distributes-over-XOR, landed
+`4200cc4`).  This is the SECOND-SESSION substantive proof, not a one-liner.
+
+**✅ Bucket B (image-review-remediation §2–§5) DONE 2026-10-10 (0-admit,
+fstar-image `a5a0d97`..`de8e858`):** all RFC-vector-independence lemmas, the
+`select_best_mask` wiring, and the full basen→image scaffold — again, no field-law
+lemmas.  The field laws (this §82/§83 tower) remain Bucket A and are UNCHANGED by
+Bucket B: the next atom is still the doubling-commutation `reduce_sub (2x) =
+reduce_sub (2·reduce_sub x)` (general `x < 2^15`), then the bridge, then comm/distrib
+(free), then the multiplicative hom → assoc, then Fermat inverse + exp/log.
+
 ## 84. Reversed-Accumulator Decoder Roundtrip — the `rev_involutive`/`append_l_cons`/`append_assoc`/`rev_rev'` Bridge
 
 > **⚠ SCOPE-REVISED (2026-10-04): the "no generic codec roundtrip" framing is

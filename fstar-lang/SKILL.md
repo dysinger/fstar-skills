@@ -185,6 +185,28 @@ let remaining = if U32.v len >= consumed then U32.v len - consumed else 0 in
 (* remaining is nat because both branches return nat *)
 ```
 
+### Integer literal suffixes — `ul` (UInt32) vs `uL` (UInt64), case matters
+
+F* fixed-width integer literals disambiguate by the case of the suffix letter:
+
+| Suffix | Type | Width |
+|---|---|---|
+| `uy` | `FStar.UInt8` | 8 |
+| `us` | `FStar.UInt16` | 16 |
+| `ul` (lowercase L) | `FStar.UInt32` | 32 |
+| `uL` (uppercase L) | `FStar.UInt64` | 64 |
+| `uL` / `UL` | `FStar.UInt64` | 64 |
+
+**`0x…uL` (capital L) is `UInt64.t`, `0x…ul` (lowercase) is `UInt32.t`.**  A 256-entry
+`list UInt32.t` written with `uL` fails **"Error 54: UInt64.t is not a subtype of
+the expected type t"** (i.e. `UInt32.t`) — the fix is a global `uL` → `ul` in the
+table literals.  This bit the CRC-32 table in fstar-image (2026-10-10): the
+"published constants" embedded as `0xEDB88320uL` were UInt64, silently the wrong
+width until the `list UInt32.t` annotation forced the error.  Named constants
+(`uint_to_t 0xEDB88320` with `open FStar.UInt32`) avoid the suffix entirely and
+are preferred for single values; a LITERAL TABLE needs the `ul` suffix on every
+entry.
+
 ---
 
 ## 5. Typeclass System
