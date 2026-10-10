@@ -5849,14 +5849,35 @@ via additivity + scalar-out (`reduce_sub (b·c) = b·reduce_sub c`, scratch-prov
 `red (reduce_sub x) = XOR_i bit_i x · red (reduce_sub (2^i))` (= `XOR_i bit_i x · red (mono i)`)
 via the just-landed `lemma_red_xor`.  So the whole thing is the single monomial fact
 **`mono (j+1) = red (mono j)`** (`mono j = reduce_sub (2^j)`).  `j<8` = `lemma_reduce_sub_double`;
-the hard `8 <= j <= 14` case needs `subst (2^j) = 2^{j-8}·n_sub` — scratch-proven helpers
-`lemma_bit_pow2 j i : bit (2^j) i = (i = j ? 1 : 0)` (via `lemma_pow2_pos_add` + `lemma_div_exact`)
-and `lemma_bits_xor_powj_zero j : bits_xor (2^j) 8 = 0` (via `lemma_bits_xor_eq_sum` +
-`lemma_bits_sum_mod` + `lemma_pow2_pos_add 8 (j-8)`); the remaining piece is the
-`subst_hi (2^j) 8 = 2^{j-8} · n_sub` induction (each `subst_hi` term `bit_{8+k}(2^j)` is
-`1` iff `8+k = j`).  Do NOT force a 15-way `assert_norm` `match` (the "brute force" the
-user rejected); prove `subst_hi (2^j) m` by a clean induction on `m` with `lemma_bit_pow2`,
-so the `j<8`/`j>=8` split is SYMBOLIC.
+the hard `8 <= j <= 14` case needs `subst (2^j) = 2^{j-8}·n_sub`.
+
+**✅ MONOMIAL ATOMS LANDED 0-admit (2026-10-10, fstar-image `89be5fb`):** the
+`subst (2^j) = 2^{j-8}·n_sub` decomposition is now COMMITTED, not scratch —
+- `lemma_bit_pow2` / `_self` / `_lt` / `_gt`: `bit (2^j) i = 1` iff `i = j`.  The
+  `i < j` case (`2^j / 2^i = 2^{j-i}` even) needs **`FStar.Math.Lemmas.cancel_mul_div
+  (pow2_pos (j-i)) (pow2_pos i)`** — NOT `division_multiplication_lemma` (that lemma is
+  `(a, b, c) -> (a/b)/c`, three args, and calling it with two SPINS SMT).  Combine with
+  `lemma_mod_mul_distr_l 2 (pow2_pos (j-i-1)) 2` to close `2^{j-i} % 2 = 0`.  The `i > j`
+  case is `small_div` but needs `lemma_pow2_pos_mono (j+1) i` FIRST (SMT will not infer
+  `pow2_pos j < pow2_pos i` from `i > j`).
+- `lemma_bits_xor_powj_zero`: `bits_xor (2^j) 8 = 0` (induct on `n`, each term `bit (2^j) i = 0`).
+- `lemma_subst_hi_powj` (+ lo/hi induction): `subst_hi (2^j) 8 = 2^{j-8}·n_sub` — the
+  lone bit `8+j` folds to one term; the `m <= j-8` branch is all-zero (XOR of zeros),
+  the `m > j-8` branch carries the single `2^{j-8}·n_sub` with `lemma_xor_zero16`/`_r`
+  discharging the trailing zero terms.
+- `lemma_subst_powj`: `subst (2^j) = 2^{j-8}·n_sub`.
+- support: `lemma_xor_zero16_r x : xor16 x 0 = x`, `lemma_powj_nsub_bound`
+  (`2^{j-8}·n_sub < 2^16`, max `2^6·29 = 1856`).
+
+**⛔ THE REMAINING ATOM (precisely characterized 2026-10-10):** with `v = 2^{j-8}·n_sub`,
+`mono j = subst v` (since `subst v < 256` ⇒ `reduce_sub (2^j) = subst (2^{j-8}·n_sub)`
+via `lemma_subst_lt256` + `lemma_subst_id`), and `mono (j+1) = subst (2v)`.  So the hard
+band collapses to **`subst (2v) = red (subst v)`** for `v = 2^k·n_sub`, `k in [0,6]` —
+the SECOND subst round of a doubled monomial (bits of `v` at `{k,k+2,k+3,k+4}`, bits
+of `2v` at `{k+1,k+3,k+4,k+5}`, so the split `k <= 3` vs `k >= 4` is where bits cross
+position 8).  CONFIRMED TRUE `assert_norm` on all 7 concrete `k` (0-admit); the SYMBOLIC
+`j` proof is the next atom (a 7-way `assert_norm` band is the sound-finite-field
+fallback the plan lists, but the user prefers symbolic).
 
 ## 84. Reversed-Accumulator Decoder Roundtrip — the `rev_involutive`/`append_l_cons`/`append_assoc`/`rev_rev'` Bridge
 
