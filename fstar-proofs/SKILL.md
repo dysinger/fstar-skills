@@ -5831,6 +5831,33 @@ Bucket B: the next atom is still the doubling-commutation `reduce_sub (2x) =
 reduce_sub (2·reduce_sub x)` (general `x < 2^15`), then the bridge, then comm/distrib
 (free), then the multiplicative hom → assoc, then Fermat inverse + exp/log.
 
+**✅ LANDED (2026-10-10, fstar-image `88e4815`): field-doubling (`red`) is
+GF(2)-linear — `lemma_red_xor a b : red (xor8 a b) = xor8 (red a) (red b)`** for
+bytes, plus `lemma_xor16_double_of_xor8 a b : xor16 (2a) (2b) = 2 · xor8 a b` (via
+`lemma_nat_xor_double a b 16` + `lemma_xor_pad a b 8 7`).  `red` = multiply by the
+generator alpha = 0x02, so its linearity is the additivity of the generator; proved
+by chaining `lemma_reduce_sub_double (xor8 a b)` (byte case) + `lemma_reduce_sub_xor
+(2a) (2b)` (additivity) + `lemma_xor_16_eq_8 (red a) (red b)` through the widening
+lemma.  This is the component that lets field-doubling commute through the
+bit-decomposition XOR-fold.
+
+**⭐ KEY REDUCTION (2026-10-10): the general doubling-commutation** `reduce_sub (2x)
+= red (reduce_sub x)` for `x < 2^15` **reduces EXACTLY to monomial doubling.**  Both
+sides become XOR-folds over the monomial basis: `x = bits_xor x 15` (recover) gives
+`reduce_sub (2x) = XOR_i bit_i x · reduce_sub (2^{i+1})` (= `XOR_i bit_i x · mono (i+1)`)
+via additivity + scalar-out (`reduce_sub (b·c) = b·reduce_sub c`, scratch-proven), and
+`red (reduce_sub x) = XOR_i bit_i x · red (reduce_sub (2^i))` (= `XOR_i bit_i x · red (mono i)`)
+via the just-landed `lemma_red_xor`.  So the whole thing is the single monomial fact
+**`mono (j+1) = red (mono j)`** (`mono j = reduce_sub (2^j)`).  `j<8` = `lemma_reduce_sub_double`;
+the hard `8 <= j <= 14` case needs `subst (2^j) = 2^{j-8}·n_sub` — scratch-proven helpers
+`lemma_bit_pow2 j i : bit (2^j) i = (i = j ? 1 : 0)` (via `lemma_pow2_pos_add` + `lemma_div_exact`)
+and `lemma_bits_xor_powj_zero j : bits_xor (2^j) 8 = 0` (via `lemma_bits_xor_eq_sum` +
+`lemma_bits_sum_mod` + `lemma_pow2_pos_add 8 (j-8)`); the remaining piece is the
+`subst_hi (2^j) 8 = 2^{j-8} · n_sub` induction (each `subst_hi` term `bit_{8+k}(2^j)` is
+`1` iff `8+k = j`).  Do NOT force a 15-way `assert_norm` `match` (the "brute force" the
+user rejected); prove `subst_hi (2^j) m` by a clean induction on `m` with `lemma_bit_pow2`,
+so the `j<8`/`j>=8` split is SYMBOLIC.
+
 ## 84. Reversed-Accumulator Decoder Roundtrip — the `rev_involutive`/`append_l_cons`/`append_assoc`/`rev_rev'` Bridge
 
 > **⚠ SCOPE-REVISED (2026-10-04): the "no generic codec roundtrip" framing is
