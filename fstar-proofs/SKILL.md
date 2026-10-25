@@ -5869,15 +5869,45 @@ the hard `8 <= j <= 14` case needs `subst (2^j) = 2^{j-8}·n_sub`.
 - support: `lemma_xor_zero16_r x : xor16 x 0 = x`, `lemma_powj_nsub_bound`
   (`2^{j-8}·n_sub < 2^16`, max `2^6·29 = 1856`).
 
-**⛔ THE REMAINING ATOM (precisely characterized 2026-10-10):** with `v = 2^{j-8}·n_sub`,
-`mono j = subst v` (since `subst v < 256` ⇒ `reduce_sub (2^j) = subst (2^{j-8}·n_sub)`
-via `lemma_subst_lt256` + `lemma_subst_id`), and `mono (j+1) = subst (2v)`.  So the hard
-band collapses to **`subst (2v) = red (subst v)`** for `v = 2^k·n_sub`, `k in [0,6]` —
-the SECOND subst round of a doubled monomial (bits of `v` at `{k,k+2,k+3,k+4}`, bits
-of `2v` at `{k+1,k+3,k+4,k+5}`, so the split `k <= 3` vs `k >= 4` is where bits cross
-position 8).  CONFIRMED TRUE `assert_norm` on all 7 concrete `k` (0-admit); the SYMBOLIC
-`j` proof is the next atom (a 7-way `assert_norm` band is the sound-finite-field
-fallback the plan lists, but the user prefers symbolic).
+**✅ MONOMIAL-DOUBLING LANDED 0-admit (fstar-image `63f17e1`+`413c9f1`, 2026-10-10).**
+`lemma_monomial_double j : mono (j+1) = red (mono j)` for `j <= 14`, where
+`mono j = reduce_sub (pow2_pos j)`.  The hard band `8 <= j <= 14` collapses (exactly as
+characterized above) to `subst (2v) = red (subst v)` for `v = 2^k·n_sub`, `k in [0,6]`,
+and is discharged by a **7-way `assert_norm` band** (the plan's sanctioned
+sound-finite-field fallback: 7 explicit GF(256) elements, NOT a 2^16 fold — sound
+because GF(256) is finite).  The `j < 8` band is SYMBOLIC (`lemma_reduce_sub_double` +
+`lemma_reduce_sub_id`).  Also landed: `lemma_subst_double_byte a : subst (2a) = red a`
+(the single-round cousin of `lemma_reduce_sub_double` — subst (2a) is already reduced).
+
+**⭐ KEY GOTCHA (cost a multi-minute spin, RECORD IT):** a finite-case band
+`match j with 8 -> ... | _ -> assert_norm (...)` whose `requires` is the **RANGE**
+`j >= 8 /\ j <= 14` makes SMT spin INDEFINITELY (it must reason about a symbolic `j`
+in a range alongside the per-branch literal exclusions).  The `requires` must be the
+**EXACT DISJUNCTION** `j = 8 \/ j = 9 \/ ... \/ j = 14` — then the whole 7-way band
+discharges in <1s.  (The caller `j <= 14` discharges the disjunction for free.)
+
+**⭐ SCALAR-OUT ATOMS LANDED (fstar-image `413c9f1`):** `lemma_subst_scale`,
+`lemma_reduce_sub_scale`, `lemma_red_scale` — a bit `b ∈ {0,1}` factors out of each
+map: `subst (b·c) = b·subst c`, `reduce_sub (b·c) = b·reduce_sub c`, `red (b·m) = b·red m`.
+Proof is a Boolean case split (`b=0`: `subst 0 = 0` via `lemma_subst_id 0`; `b=1`:
+identity).  These are the Boolean-select facts the doubling-commutation needs to
+commute the reduction through the bit-decomposition XOR-fold.
+
+**⛔ DOUBLING-COMMUTATION (step 2, NOT yet landed) — fold-level WALLS found 2026-10-10
+(scratch, do NOT re-grind):** all its ATOMS are now landed (`lemma_reduce_sub_xor`,
+`lemma_red_xor`, `lemma_xor16_double_gen`, the scalar-outs, `lemma_monomial_double`);
+the remaining work is the FOLD-LEVEL additivity `reduce_sub (fold_xor f n) = fold_xor
+(fun i -> reduce_sub (f i)) n`.  Verified standalone (clean, <1s) WITH the 4 bound
+preconditions `n<=15 /\ forall i<n. f i<2^16 /\ forall m<=n. fold_xor f m<2^16 /\
+forall m<=n. fold_xor (fun i->reduce_sub (f i)) m<2^16`.  **BUT discharging those
+`forall` bound preconditions SPINS** (both via nested-aux `FStar.Classical.forall_intro
++ move_requires`, AND via a specialized no-forall fold-additivity).  ⇒ The fix is to
+AVOID `forall` preconditions: carry a CONCRETE accumulator invariant (mirror
+`lemma_raw_mul_go_bilinear`, which carries the CLOSED `a*c<2^15`, NOT a forall) —
+e.g. an accumulator fold with the invariant `acc < 2^16`.  Do NOT fall back to
+`assert_norm` here (x ranges over 32768 values, infeasible — unlike the 7-band).
+Also verified clean: `lemma_fold_xor_bounded` (fold of `<2^16` terms is `<2^16`),
+`lemma_bits_xor_eq_fold` (`bits_xor a n = fold_xor (fun i->bit a i·2^i) n`).
 
 ## 84. Reversed-Accumulator Decoder Roundtrip — the `rev_involutive`/`append_l_cons`/`append_assoc`/`rev_rev'` Bridge
 
