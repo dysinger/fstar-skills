@@ -38,6 +38,7 @@ with C/OCaml/WASM extraction.  This skill is split into focused sub-skills.
 | Use Seq, List, Map, Set, Option (≤ 2025.12.15) | [fstar-stdlib](fstar-stdlib/SKILL.md) |
 | Write lemmas, proofs, SMTPat, handle GADT barriers (≤ 2025.12.15) | [fstar-proofs](fstar-proofs/SKILL.md) |
 | Debug codec combinator opacity, `.wfcv`/`.rest_cond` admits | [fstar-proofs §18](fstar-proofs/SKILL.md) |
+| Make a `codec`-style record **bidirectional** (both laws); `remainder s` vs Lean's `Suffix n`; tautology trap | [fstar-proofs §87](fstar-proofs/SKILL.md) |
 | Audit cross-module buffer layouts (F* ↔ C) | [fstar-proofs §33](fstar-proofs/SKILL.md) |
 | Audit admit()-bodied functions for buffer overflows | [fstar-proofs §34](fstar-proofs/SKILL.md) |
 | Audit admit counts across docs/source (drift) | [fstar-proofs §40](fstar-proofs/SKILL.md) |

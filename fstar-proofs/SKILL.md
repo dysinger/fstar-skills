@@ -6161,3 +6161,147 @@ Two things that made the roundtrip prove (both are REAL, neither a dodge):
   (NOT `fst tl`/`snd tl`) so the tuple reconstruction reduces.
 - The root (`[]`) is OUTSIDE `sep_by1_opt_trailing`'s `wfcv` (`Cons?`): handle
   `decode_domain [] = Some root_domain` as a special case in the wrapper.
+
+## 87. Making a `codec`-style record *bidirectional* — five refuted designs and the SMT/type traps they exposed
+
+**Session 2026-10-31.**  Task: today's `codec` record states only
+`dec (enc v ++ r) = Inr (v, |enc v|)` — i.e. `decode ∘ encode = id`, ONE
+direction, under three guards (`wfcv`, `wfcv_prop`, `rest_cond`).  Nothing
+states the converse.  Goal: constrain both directions.  This section records
+what was **refuted**, so nobody re-derives it, and the type-level traps that
+cost real turns.
+
+### Finding: `option`-valued `unapply` CANNOT express a prefix codec
+
+The Lean port (`../lean-codec`) has
+
+```lean
+structure Iso (α β : Type) where
+  apply : α → Option β
+  unapply : β → Option α
+  law : ∀ a b, apply a = some b ↔ unapply b = some a
+```
+
+and it *works* there because its carrier is `Suffix n` — **the remainder is a
+type index inside the value**.  Copying that shape into F\* with
+`unapply : byte_seq -> option byte` fails for every prefix codec: `unapply [x]`
+and `unapply [x;99]` both return `Some x`, so the law demands
+`Some [x] = Some [x;99]`.  F\* returning `option` **throws away the exact
+information the law needs**.
+
+Honest statement (the first draft of this finding overclaimed "impossible" — it
+is a *design tension*, not an impossibility): that shape can express a
+**whole-document** codec, not a **prefix** codec.  Since `product`, `count`,
+`take_until`, `sep_by1*` and every envelope format need prefix decoding, the
+remainder must be returned.
+
+### The refinement that substitutes for Lean's index
+
+```fstar
+let remainder (s: byte_seq) = r:byte_seq{ Seq.length r <= Seq.length s }
+let dec_result (a: eqtype) (s: byte_seq) = option (a & remainder s)
+```
+
+`remainder s` is the closest F\* analogue of `Suffix n`: both make "the tail is
+a suffix of the input" a **typing** fact rather than a lemma.  Two combinators
+(`product`, `count`) **fail without it** — each inherits an undischargeable
+`|r1| <= |s|` precondition.  Thread it through recursive decoders:
+`count_dec : ... -> Tot (option (list a & remainder s))`, not
+`option (list a & byte_seq)`.
+
+### `eqtype`, not `Type`
+
+`<==>` over `option a` needs `HasEq a`.  Every `iso`/`codec` must quantify
+`(a: eqtype)`.  The knock-on is **signature churn**: `product #a #b : codec (a
+& b)` becomes `#a #b:eqtype`, so every combinator signature and every downstream
+call site changes.  Budget for it — it is not a one-line change.
+
+### The record must be `noeq` — and that is exactly AUDIT §4's complaint
+
+A `codec` with a `prop` field (`rest_cond`, `wfcv_prop`) cannot be an `eqtype`,
+so `noeq` is forced.  But `noeq` records are **opaque to SMT**: the checker
+cannot unfold them, which is precisely why every law must be a `Lemma` field
+discharged by Z3 rather than structural.  Recognise this honestly: a
+bidirectional-record redesign does **not** by itself make invertibility
+structural.  A truly structural fix needs an **inductive** `Codec` with a
+recursive `decode` (Lean's shape) — a different project.
+
+### Five refuted designs (do not retry)
+
+| # | Shape | Why it fails |
+|---|---|---|
+| 1 | `unapply : b -> option a` (Lean verbatim) | discards the remainder; law unstatable for prefix codecs |
+| 2 | `law_fwd` unconditional over `r` | **false for greedy decoders**: `satisfy_many0` consumes *into* `r` |
+| 3 | `law_bwd` without `rest_cond` | **false at the empty value**: `xs=[]`, `s=[1;1]`, greedy `dec [1;1]=([1;1],[])` demands `enc []=Some [1;1]` |
+| 4 | `rest_cond : a -> seq -> prop` as a hypothesis of both laws | **circular through `product`**: hypothesis is about the *encoded* `v1`, `law_bwd` needs it about the *decoded* `v1'`, and relating them needs the very laws that need it |
+| 5 | value-free `rest_cond : seq -> prop` in **both** laws | **not prefix-closed**: `c1.rest_cond ((e1++e2)++r)` cannot be derived from `c1.rest_cond e1`.  (Machine-checked counterexample.) |
+
+### The shape that DID verify (`spike-amendment5.fst`)
+
+```fstar
+noeq
+type codec (a: eqtype) = {
+  enc       : a -> Tot (option byte_seq);
+  dec       : (s: byte_seq) -> Tot (dec_result a s);
+  wfcv      : a -> Tot bool;                 (* SURVIVES — see below *)
+  rest_cond : byte_seq -> Tot prop;          (* suffix-only *)
+  law_fwd   : (x) -> (e) -> (r) -> Lemma
+    (requires wfcv x = true /\ enc x = Some e /\ rest_cond r)
+    (ensures dec (Seq.append e r) = Some (x, r));
+  law_bwd   : (s) -> (v: a) -> (r: remainder s) -> Lemma
+    (requires dec s = Some (v, r))
+    (ensures (exists (e: byte_seq). enc v = Some e /\ s == Seq.append e r));
+}
+```
+
+`token` + `product` + a real `satisfy_many0`-shaped codec all verify (0-admit;
+rlimits 200×5, 300×1).  **The cost, which must be stated whenever this is
+cited:** `wfcv` comes back (so "partiality collapses into `option`" is FALSE),
+and `law_bwd` carries no `rest_cond` at all — it says only "the encoding is the
+consumed prefix", so it is strictly **weaker** than designs 3–5.
+
+### The general lesson: `rest_cond` was doing two incompatible jobs
+
+(i) stop a greedy decoder at the right place, and (ii) be recoverable as a fact
+about the *encoding* so the backward law can say something about the value.  A
+suffix predicate ranges over the wrong operand for (ii).  Whenever a field in a
+bidirectionality law feels both necessary and unprovable, look for this: **one
+predicate, two operands**.  The fix is almost always to split it by operand,
+not to move it between hypothesis and conclusion (design 4 proves moving it
+changes nothing).
+
+### ⚠ Tautology trap — "verified" ≠ "used"
+
+A spike proving the laws for a codec with `rest_cond := (fun _ _ -> True)` is
+worth **nothing**.  Check by **deleting the hypothesis**: if the module still
+verifies, the hypothesis was unused (fstar-proofs §26).  A spike in this
+session passed that way and was cited as evidence for two rounds before the
+deletion test exposed it.  Also test *semantically*: exhibit inputs making the
+conclusion **false** without the hypothesis, not merely unproved.
+
+### Process rule (cost five rounds here)
+
+**Amend the type in the spike source and re-run the spike BEFORE writing prose
+about it.**  In every round of this session where the documents were updated
+first, they claimed more than the machine had proved — including one round where
+the prose asserted a fifth amendment while every spike file still carried the
+fourth.  Prose that outruns the checker is worse than no prose: it is cited.
+
+### Small F\* traps hit this session
+
+- **`Seq.cons` is a `let`**, `cons x s = append (create 1 x) s` — so tag-byte
+  facts follow from `append_assoc` + `lemma_eq_intro`.  There is **no**
+  `Seq.lemma_index_cons` / `lemma_cons_append`; stop searching, hand-prove.
+- **`Seq.append_assoc`**, not `lemma_append_assoc`.  `seq_of_list` already
+  returns `s:seq a{List.length l == length s}` — no separate length lemma needed.
+- **Never `let`-bind a scrutinee** before matching it (`let xa = i.apply x in
+  match xa with`): SMT will not rewrite `match i.apply x` into `match xa`, and
+  the proof silently becomes unprovable.
+- **An uppercase identifier followed by a digit** (e.g. `LQ2`) is parsed as a
+  **universe-variable binder** (`LQ` at level 2); the binding vanishes and you
+  get a spurious "Identifier not found".  Same family as the known reserved `M`
+  and `by`.
+- To prove a biconditional field of a record is composable, extract
+  **per-direction lemmas** (`apply_fwd`/`apply_bwd`) — a `Lemma`-typed field
+  called in a proof puts the biconditional in context, and SMT will not choose
+  a side through a `match`.
