@@ -62,6 +62,23 @@ description: F* core language — types, effects, operators, syntax, modules, ty
 
 **Rule**: Use `include` for re-exporters. Use `open` for internal use.
 
+**A re-exporter needs BOTH** (verified 2026-11-01, `fstar-codec`).  `include M`
+unions `M`'s exported ids into *your* module's export set, so modules that
+`open` you see them.  But it does **not** make them nameable in your own
+module's body: a facade that does
+
+```fstar
+module Data.Codec
+include Data.Codec.Types
+include Data.Codec.Text
+let probe (b: byte) : bool = is_upper b   (* Error 72: is_upper not found *)
+```
+
+fails, while `include Data.Codec.Types` + `include Data.Codec.Text` +
+**`open Data.Codec.Text`** works.  Note the error surfaced at a *downstream*
+module first (the facade itself had no reference until I added the probe), so
+it looks like a broken re-export when it is a scoping fact about `include`.)
+
 ### `.fsti` / `.fst` Interface Files
 
 F* supports splitting a module into interface (`.fsti`) and implementation (`.fst`).

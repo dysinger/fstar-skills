@@ -6305,3 +6305,81 @@ fourth.  Prose that outruns the checker is worse than no prose: it is cited.
   **per-direction lemmas** (`apply_fwd`/`apply_bwd`) — a `Lemma`-typed field
   called in a proof puts the biconditional in context, and SMT will not choose
   a side through a `match`.
+
+## 88. A law that "fails in both branches" is a missing antecedent, not a bad proof
+
+Diagnostic heuristic, verified 2026-11-01 while making `alt` close under a
+weakened bidirectional law (see §87).
+
+### The signal
+
+You are proving a `law_*` field whose conclusion is a `match` on the value:
+
+```fstar
+let alt_law_fwd ... (v: either a b) (e: byte_seq) (r: byte_seq) : Lemma
+  (requires ...) (ensures alt_dec c1 c2 p1 (e ++ r) = Some (v, r))
+  = match v with
+    | Inl x -> c1.law_fwd x e r     (* Error 19 *)
+    | Inr y -> c2.law_fwd y e r     (* Error 19 *)
+```
+
+**Both branches failing** is qualitatively different from one failing:
+
+| Symptom | Meaning |
+|---|---|
+| one branch fails | that branch's proof step is wrong, or its sub-lemma is too weak for that case |
+| **both** branches fail | a **hypothesis is missing** — something the *body* cannot supply regardless of which arm you take |
+| the `*_bwd` direction fails | the law is genuinely too weak (the real design question) |
+
+The third row is why this matters: a too-weak law fails asymmetrically — in the
+backward direction, and usually in the interesting case (e.g. a greedy codec),
+not uniformly in both arms of a `match`.  So "both arms fail" rules *out* the
+"the law is too weak" hypothesis and points at a missing antecedent.
+
+### The case
+
+Tag-free alternation picks a branch by inspecting a byte:
+
+```fstar
+let alt_dec (#a #b) (c1: codec a) (c2: codec b) (p1: byte -> bool) (s: byte_seq)
+  = if alt_pick p1 s then (match c1.dec s with ...) else (match c2.dec s with ...)
+```
+
+`c1.law_fwd`'s conclusion is `c1.dec (e ++ r) = Some (x, r)`, but the goal is
+`alt_dec ... = Some (Inl x, r)` — which requires the `if` to take the *first*
+branch, i.e. `alt_pick p1 (e ++ r) = true`.  Nothing supplies that.  Hence both
+arms fail.
+
+The missing antecedent is a **well-formedness condition of the combinator**,
+tying the discriminator to each arm's *encoding*:
+
+```fstar
+alt_ok (Inl x) e = c1.wfcv x && Seq.length e > 0 &&     p1 (Seq.index e 0)
+alt_ok (Inr y) e = c2.wfcv y && Seq.length e > 0 && not (p1 (Seq.index e 0))
+```
+
+This is not a weakening — `Data.Codec.Types:2417`'s existing `alt_wfcv` states
+exactly it, and the existing `alt_roundtrip` already consumed it.  The lesson is
+about *diagnosis*: I initially wrote a prose note claiming "the law is too weak
+for `alt`", which was wrong, and the two-sided failure was the evidence against
+it.
+
+### Rules
+
+1. **When both arms of a `match` on the decoded value fail, look for a missing
+   antecedent before touching the law.**
+2. **Check whether the antecedent already exists** in the library's own
+   well-formedness predicate (`*_wfcv`).  If it does, the law is fine and the
+   gap was in your statement of the combinator.
+3. **Deletion-test every hypothesis you add.**  Remove it and re-verify: if the
+   proof still goes through, it was decoration.  Do the same for the
+   `rest_cond`-style side conditions (`alt_rest_cond := True` must break the
+   proof).  A hypothesis you did not verify is load-bearing is a hypothesis you
+   weakened the spec to accommodate.
+4. **Watch for a discriminator keyed inconsistently on the two sides.**  An
+   intermediate draft of this spike keyed the suffix condition on `p1 r` while
+   `dec` keyed on `p1 (head s)`; a two-line probe proved those are *unrelated*
+   (`alt_pick p1 (e ++ r) = alt_pick p1 r` is not provable for non-empty `e`,
+   nor is its negation).  The draft was incoherent, and no amount of SMT would
+   have fixed it.  When a `match`-keyed law misbehaves, probe the discriminating
+   function itself in a throwaway module.

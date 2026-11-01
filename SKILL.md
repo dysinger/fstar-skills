@@ -39,6 +39,8 @@ with C/OCaml/WASM extraction.  This skill is split into focused sub-skills.
 | Write lemmas, proofs, SMTPat, handle GADT barriers (≤ 2025.12.15) | [fstar-proofs](fstar-proofs/SKILL.md) |
 | Debug codec combinator opacity, `.wfcv`/`.rest_cond` admits | [fstar-proofs §18](fstar-proofs/SKILL.md) |
 | Make a `codec`-style record **bidirectional** (both laws); `remainder s` vs Lean's `Suffix n`; tautology trap | [fstar-proofs §87](fstar-proofs/SKILL.md) |
+| A law that **fails in both `match` branches** — missing antecedent vs too-weak law | [fstar-proofs §88](fstar-proofs/SKILL.md) |
+| **Split a module** safely: `make check` does not track deps; `include` ≠ `open`; unclosed `(** *` swallows a file; tier closure | [fstar-2026.09.20 §10](fstar-2026.09.20/SKILL.md) |
 | Audit cross-module buffer layouts (F* ↔ C) | [fstar-proofs §33](fstar-proofs/SKILL.md) |
 | Audit admit()-bodied functions for buffer overflows | [fstar-proofs §34](fstar-proofs/SKILL.md) |
 | Audit admit counts across docs/source (drift) | [fstar-proofs §40](fstar-proofs/SKILL.md) |
@@ -80,6 +82,14 @@ with C/OCaml/WASM extraction.  This skill is split into focused sub-skills.
 | `include M` | Copy-pastes M's content; downstream sees symbols | Yes |
 
 For re-exporters, use `include`.  For internal use, use `open`.
+
+> ⚠️ **A re-exporter needs *both*.**  `include M` lets *consumers* of your
+> module see `M`'s symbols, but it does **not** put them in your own module's
+> scope for your own later definitions.  A facade that `include`s `M` and then
+> names one of `M`'s functions gets `Error 72` — at a *downstream* module,
+> which misdiagnoses the problem.  Write `include M` **and** `open M`.
+> (Found 2026-11-01 splitting `Data.Codec.Types`; see
+> [fstar-2026.09.20 §10.2](fstar-2026.09.20/SKILL.md).)
 Full details: [fstar-lang](fstar-lang/SKILL.md) § Module System.
 
 ## Effect Hierarchy

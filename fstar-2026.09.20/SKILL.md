@@ -746,3 +746,135 @@ audit must include (missed once):
   `take_until` (which return `(enc,dec,wfcv)` triples, not `codec` records) plus
   their helper towers were lemmas-only.  A value-level combinator's rename/delete
   would leave the build GREEN.  Anchor the values too.
+
+## 10. Module splitting: three traps that all pass `make check`
+
+Learned splitting `Data.Codec.Types` (4,133 lines) into core + `Data.Codec.Text`
+in `fstar-codec` (2026-11-01).  **All three of these produce a green build.**
+That is the whole point of this section.
+
+### 10.1 `make check` does NOT track inter-module dependencies
+
+The common per-module Makefile rule is
+
+```make
+$(OUT)/checked/%.fst.checked: src/%.fst
+	$(FSTAR) ... --cache_checked_modules --cache_dir $(OUT)/checked $<
+```
+
+The prerequisite is **only the module's own source**.  So after editing
+`Data.Codec.Types.fst`, `make check` will re-verify `Types` and then report
+"up to date" for `Data.Codec.Pulse`, whose `.checked` was built against the
+*old* `Types`.  The build is green and the result is meaningless.
+
+**Fix:** after any change to a module others depend on, delete their stamps:
+
+```bash
+rm -f out/checked/Data.Codec.Pulse.fst.checked out/checked/Data.Codec.Test.Pulse.fst.checked
+nix develop -c make check
+```
+
+Check mtimes rather than trusting the exit code — if
+`out/checked/<Dep>.fst.checked` is *older* than `src/<Module>.fst` and
+`make` did not rebuild it, the green is stale.
+
+### 10.2 `include M` does not put `M`'s symbols in the includer's own scope
+
+A facade module that does
+
+```fstar
+module Data.Codec
+include Data.Codec.Types
+include Data.Codec.Text      (* downstream can see Text's symbols ... *)
+```
+
+still **cannot name** `is_upper` in its own body.  `include` unions
+`env.includes` / `trans_exported_id_set` (so *consumers* of `Data.Codec`
+resolve `is_upper` correctly), but it does not add `M`'s bindings to the
+*current* module's name-resolution scope for its own subsequent definitions.
+
+**Fix — use both:**
+
+```fstar
+include Data.Codec.Types
+include Data.Codec.Text
+open Data.Codec.Text        (* so this module's own body can name them *)
+```
+
+Symptom if you forget the `open`: `Error 72 Identifier not found: is_upper`
+at a *downstream* module, while `Data.Codec` itself verified fine — which is
+actively misleading about where the bug is.
+
+### 10.3 An unclosed `(** … *` silently swallows the rest of the file
+
+A doc comment opened `(** foo *` (missing the closing paren) does not error.  It
+consumes everything to the end of the file (or to the next `*)`), and the
+module **verifies green with most of its definitions gone**.
+
+This bit during a mechanical move: a section header written as
+`(** Character predicates *` hid ~100 lines — `is_upper` through `digit_byte`.
+`make check` was green.  The tell was that `include Data.Codec.Text` appeared
+not to re-export, and only three symbols were reachable — so the "include
+doesn't work" hypothesis was wrong and the file was truncated.
+
+**Checks:**
+
+```bash
+# every ( * / ( ** must be closed; a quick structural scan
+python3 - <<'PY'
+import sys
+for path in sys.argv[1:]:
+    L=open(path).read().split('\n'); i=0; bad=[]
+    while i<len(L):
+        if '(*' in L[i] and '*)' not in L[i]:
+            j=i+1
+            while j<len(L) and '*)' not in L[j]: j+=1
+            if j>=len(L): bad.append((i+1,L[i][:60]))
+            i=j+1
+        else: i+=1
+    print(path, 'unclosed:', bad)
+PY' src/*.fst
+
+# and check the module actually exports what you think
+grep -cE '^(let |let rec |type )' src/Data.Codec.Text.fst   # expect the full count
+```
+
+**Meta-lesson:** after a mechanical move, count the definitions.  "It
+verified" is not evidence that the code is present.
+
+### 10.4 Splitting a module: compute the tier closure before moving anything
+
+Before moving symbol `s` out of core, ask which other moved symbols (and which
+*remaining* core symbols) reference `s`.  A dependency edge core → new-module
+is a cycle and cannot be built.  Compute it mechanically:
+
+```python
+# for each candidate binary symbol, which core symbols reference it?
+used = {n for n in candidates
+        if re.search(r'(?<![A-Za-z0-9_.])'+re.escape(n)+r'(?![A-Za-z0-9_])', core_text)}
+```
+
+In `fstar-codec` this revealed that `varint` (a core leaf) calls
+`varint_encode_go`, and `word32be/le` call `lemma_word32_enc_bytes`, and
+`digits_to_int` is itself core — so **29 of 35** candidate "binary" symbols had
+to stay in core.  Discovering that *after* writing the new module is how you
+get a 103-line module that does not deliver the split it advertises.
+
+Also check the extraction layer: a `#lang-pulse` module that names leaves via
+`module DC = Data.Codec.Types` pins those leaves to core, because retargeting
+the alias is a source change and some changes freeze their downstream consumers.
+
+### 10.5 `pow2`-style helpers look like leaf material but are core vocabulary
+
+A helper used by the very symbols you are *moving* must stay where the movers
+are.  `pow2` was assigned to the text tier (its only "consumer" was
+`string_is_ascii`) — but it had **23 uses inside core** in varint arithmetic
+(`value + piece * pow2 shift`) and `assert_norm (pow2 32 = 4294967296)`.  A
+text-tier `pow2` would have made core depend on the text module: an immediate
+cycle.
+
+Grep the *whole* core for each candidate, not just its nominal consumer:
+
+```bash
+grep -cE '\bpow2\b' src/Data.Codec.Types.fst   # 23 — it is core vocabulary
+```
