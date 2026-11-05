@@ -6383,3 +6383,286 @@ it.
    nor is its negation).  The draft was incoherent, and no amount of SMT would
    have fixed it.  When a `match`-keyed law misbehaves, probe the discriminating
    function itself in a throwaway module.
+
+## 89. When a proof needs rlimit 250+ and still fails, suspect the DEFINITION, not the proof
+
+Verified 2026-11-01 while making a tag-prefixed `sum` codec carry both laws
+(continues §87/§88). **This one saved six failed attempts' worth of time on the
+seventh, and the delta was rlimit 250 → 40.**
+
+### The signal
+
+Every fact SMT needs is already in the context — the length bound, the index
+equality, the slice equality — and the goal *still* will not close. Repeatedly
+raising `--z3rlimit` changes nothing (tried 200 → 250 → 1600). The failing goal
+is an unfolding equation like
+
+```fstar
+sum_dec c1 c2 (Seq.append (Seq.cons 0x00uy e1) r) = Some (Inl v1, r)
+```
+
+where `sum_dec` is your own `if`-chain. **That is not a missing lemma. It is a
+term you are asking SMT to reduce which it cannot normalise.**
+
+### Why the if-chain never normalises
+
+The decoder's own body contains a **nested `match` on a record field** under an
+`if` arm, and that match's result carries a **dependent refinement**:
+
+```fstar
+let sum_dec c1 c2 s =
+  if Seq.length s < 1 then None
+  else if Seq.index s 0 = 0x00uy
+  then (match c1.dec (Seq.slice s 1 (Seq.length s)) with   (* <-- here *)
+        | None -> None
+        | Some (v1, r1) -> Some (Inl v1, r1))              (* r1 : remainder (slice ...) *)
+  ...
+```
+
+A reduced probe settled it: a decoder with **no** nested match unfolds fine; add
+the nested `match c.dec (...)` back and it stops. The refinement is what blocks
+the reduction.
+
+### The fix: derive the codec from an already-proved one
+
+Split the decode into two steps, where **step 1 is a law you already proved**:
+
+```fstar
+let sum_tag_dec c1 c2 (tag: byte) (r: byte_seq) =      (* match on a VALUE, not on index/slice *)
+  if tag = 0x00uy then (match c1.dec r with None -> None | Some (v1,r1) -> Some (Inl v1, r1))
+  else if tag = 0x01uy then (...)
+  else None
+
+let sum_dec c1 c2 s =
+  match token.dec s with                               (* token's law_bwd gives  s == [tag] ++ r *)
+  | None -> None
+  | Some (tag, r) -> sum_tag_dec c1 c2 tag r
+```
+
+SMT now only normalises `sum_tag_dec` — a two-way match on a concrete byte.
+`token.law_bwd` supplies the `s == [tag] ++ r` split, so the composite never
+re-derives index/slice facts by hand.
+
+**The general recipe.** Before writing a decoder that peels a fixed-width field
+and branches on it, ask: *is there an already-proved codec whose decoder does
+that peel?* If so, `match` on **its result** instead of re-indexing the input.
+The first step becomes a discharged law and the hard normalisation disappears.
+`token` here; `word16be`/`varint` in the same library's dispatcher.
+
+### Corollary — this is NOT the same as "just raise the rlimit"
+
+Some proofs genuinely need a high cap (`sep_by1_opt_trailing_roundtrip` needs
+800 and raising it further does not help *either*, but the proof is real).
+Distinguish by **what the failure looks like**:
+
+| Failure | Diagnosis |
+|---|---|
+| goal contains an unfolding equation for *your own* non-recursive `let`, and all its ingredients are in context | term-shape problem → **redefine** (§89) |
+| obligation is a genuine arithmetic/quantifier obligation with a sub-lemma missing | missing lemma → add it, then raise cap if needed |
+| raises indefinitely with growing cap and no progress | the statement is wrong (§87/§88) |
+
+## 90. Trying to REFUTE a hypothesis is a first-class proof activity
+
+Verified 2026-11-01, same change. The question was: `map_` needed an extra
+record-level hypothesis (`retract`: `f a_val = Some w ==> g w = Some a_val`);
+**can it be derived instead**? The answer was *no*, and the *no* was worth more
+than a stalled proof attempt would have been.
+
+### The technique
+
+To show hypothesis `H` is **not derivable** from the laws, build **a complete,
+law-abiding instance** of the structure where `H` fails *and* the law's
+`ensures` is **false**. Then no proof without `H` can exist, because your model
+refutes it.
+
+Concrete shape used (full source in the change's `NegCtl.fst`):
+
+```fstar
+(* A legal codec: empty encodings are permitted; dec consumes nothing. *)
+let z_enc (x: int) : option byte_seq = if x = 0 then Some Seq.empty else None
+let z_dec (s: byte_seq) : dec_result int s = Some (0, s)
+(* ... laws proved, so the codec is legal ... *)
+
+(* Then: map_dec Seq.empty = Some (0, Seq.empty)  but  map_enc 0 = None,
+   so `exists e. map_enc 0 = Some e /\ ...` — the law's ensures — is FALSE. *)
+```
+
+This is **strictly stronger than "I could not prove it"**, and it ends the
+question instead of leaving it open for another session to retry.
+
+### Two things to get right
+
+1. **Assert the failure in CI.** A refutation module must *fail* to verify; if
+   it ever starts verifying, the refutation is wrong. Put it in a separate
+   "expected-failure" list in the runner and fail the run if it passes.
+
+2. **Classify by the TRUTH-VALUE of the module's claim, not by what the
+   module argues for.**  This is the step that goes wrong, and it went wrong
+   here: a module written to argue *against* a design choice proved a
+   *positive* fact (`loose_dec s = Some x /\ strict_dec s = None` — "a
+   disagreement witness exists").  That claim is TRUE, so it belonged in the
+   passing list.  It was filed as a refutation; the CI assertion caught it.
+
+   The two axes are independent:
+
+   | What the module is *for* | What it *claims* | List |
+   |---|---|---|
+   | argues FOR a hypothesis | the hypothesis holds | passing |
+   | argues AGAINST a hypothesis | **some claim is false** | expected-failure |
+   | argues AGAINST a hypothesis | **a counterexample EXISTS** | **passing** |
+
+   The third row is the trap: "here is a model refuting H" is usually stated
+   *positively* as `exists m. P m /\ not (H m)`, which verifies.  Only a
+   module whose **`ensures` is itself false** is a refutation module.
+
+   **Mechanical pre-flight check** — ask of each new module, in this order:
+   1. Does it end in `All verification conditions discharged successfully`?
+      If yes it is a **passing** module; put it in the main list.  Stop.
+   2. If it fails, is the failure because a lemma is missing (fixable) or
+      because the stated claim is **false by construction**?  Only the latter
+      is a refutation, and only then does it go in the expected-failure list.
+
+   A module that argues against a design and *passes* is the strongest kind of
+   evidence there is — it proves the counterexample.  Do not demote it by
+   mislabelling it "refutation".
+
+### The reusable question
+
+When a hypothesis "feels necessary but unproven", the three outcomes are very
+different in value:
+
+| Outcome | Value |
+|---|---|
+| proved | best — the hypothesis can be dropped |
+| **refuted by a model** | **equally good — it can never be dropped, and you now know why** |
+| neither | worst — leaves the question open for the next session |
+
+Aim for one of the first two. A counterexample is a *result*, not a setback.
+
+## 91. A "control" that asserts the hypothesis under test is a TAUTOLOGY — two false-green traps
+
+Verified 2026-11-02 while running per-site deletion tests on a codec's
+well-formedness guard. **Both mistakes below produced a GREEN build and looked
+like evidence. Neither was.** A deletion test is only worth running if you
+actively defend against these two, because they fail in the *safe* direction —
+they make you believe a hypothesis is redundant.
+
+### Trap 1 — the control asserts what it is supposed to prove
+
+Standard deletion-test structure: a **control** (hypothesis present, must
+verify) and a **variant** (hypothesis removed, must fail). The failure mode is
+writing, inside the control's proof body,
+
+```fstar
+law_fwd = (fun xs e r ->
+  assert (FStar.List.Tot.for_all f0 xs);   (* <-- THE HYPOTHESIS ITSELF *)
+  ...)
+```
+
+The control then verifies — because it was handed the very fact under test.
+Every "the control passes, therefore the guard suffices" conclusion drawn this
+way is vacuous.
+
+**Rule:** the control's proof body must contain **no assertion of the
+hypothesis**. Put the assertion in the *variant* only, where it is the thing
+that must fail. If a control needs a helper lemma, that is fine; if it needs an
+`assert` of the question being asked, the experiment is invalid.
+
+### Trap 2 — a `let`-bound predicate does not unfold into SMT
+
+The same control written as
+
+```fstar
+let wfcv_ = (fun xs -> for_all f0 xs) in
+... f_wfcv = wfcv_ ...
+```
+
+leaves `wfcv_ xs` **opaque** to the solver: the context shows `wfcv_ xs = true`
+and the goal needs `for_all f0 xs`, and nothing connects them. The identical
+experiment with the guard **inlined** behaves differently.
+
+This is the same root cause as §7 of `fstar-2026.09.20` (`assert_norm` does not
+reduce `let`-bound variables): a `let` binding is a free variable whose definition
+is not substituted into the redex.
+
+**Rule:** in a deletion test, inline the predicate into the record field. Do not
+route it through a `let`. If you must share it, prove a `lemma_*_eq` accessor and
+call it explicitly — never rely on SMT to unfold the binding.
+
+### The positive pattern, when you must distinguish two fields
+
+A deletion test cannot register a difference between `wfcv` and a
+`wfcv_prop = fun _ -> True` — they are the *same guard*. When you need to
+measure whether a conjunct is load-bearing, split the record field-wise so the
+conjunct is a **real field the law consumes**:
+
+```fstar
+noeq type codec_fwd (a: eqtype) = {
+  ...
+  f_wfcv      : a -> Tot bool;
+  f_wfcv_prop : a -> Tot prop;        (* the conjunct a fold would hide *)
+  f_law_fwd   : ... (requires f_wfcv x = true /\ f_wfcv_prop x /\ ...) ...
+}
+```
+
+Then empty `f_wfcv_prop` alone and re-run. A `codec` whose `law_bwd` you do not
+need can be built by **deleting the backward law field**, not by discharging it —
+`law_bwd = (fun s v r -> ())` will *not* close for a codec with a real decoder.
+
+### When the answer is "the fold is a no-op"
+
+Before building any harness, read the predicate. If the legacy field you are
+"deleting" is `fun _ -> True`, there is nothing to delete and the deletion test
+cannot say anything. The measurement is a context dump (assert `False` and read
+the antecedent), which shows whether the fact is already present.
+
+## 92. A value-dependent law CANNOT be a record field — it is an elaboration error, not a proof failure
+
+Verified 2026-11-02. This settles a whole class of "should this be a field or a
+parameter?" design questions **without** any proof attempt.
+
+A record type whose law field quantifies a value fixed and binds its witness
+existentially:
+
+```fstar
+law_fwd : (x: a) -> (e: byte_seq) -> (r: byte_seq) -> Lemma
+  (requires wfcv x = true /\ enc x = Some e /\ ...) (ensures ...)
+```
+
+can carry a law about `x` — but **cannot** carry a law whose `requires` mentions
+a value that the same field binds internally, and cannot carry a proposition
+parameterised by a value the *caller* supplies per term (e.g. `f a == Some v`
+where `v` is the output of a conversion).
+
+The failure is at **elaboration**:
+
+```
+* Error 189: Expected expression of type _: list byte -> bool, got expression f0
+```
+
+or
+
+```
+* Error 12: Expected type Type
+  but dec_result (Prims.list byte) has type s: byte_seq -> Type0
+```
+
+— not `Error 19: Failed to prove`. That distinction is the diagnostic: if
+defining the field errors *before* any VC is generated, it is a typing question
+and no amount of proof engineering will help.
+
+**Consequences.**
+
+- A guard that mentions the *output* value must be **folded into the single
+  boolean the record carries**, not kept as a parallel `prop` field.
+- A property quantified over the decoder's image (e.g. "these two functions are
+  inverse on values the base codec can emit") must be a **parameter of the
+  combinator**, because it cannot inhabit a field of the same record it
+  constrains.
+- A record that quantifies `x: a` fixed cannot express a law relating `enc` and
+  `dec` *schematically* over all values; doing so needs a structurally recursive
+  (inductive) description instead.
+
+**Rule:** before spending an hour proving, ask whether the statement fits in a
+field's quantifier. If the `requires` clause would need a variable bound inside
+that same clause, stop — the design is wrong, not the proof.

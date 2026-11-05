@@ -165,6 +165,7 @@ continuation lines if present. Parse `@tags` with `re.findall`.
 | Duplicate `(**` doc blocks | Keep only the doc immediately before the `let`/`type`; remove orphaned first block |
 | Line starting with `module` inside fsdoc | Reword — `grep '^module '` in build loops AND Makefiles picks it up as a module name; causes phantom verify targets / wrong echo names. `head -1` then selects a prose line instead of the real `module X` declaration.
 | Unclosed `(**` without matching `*)` | All subsequent source code (let bindings, types, lemmas, everything) is silently swallowed as doc-comment prose. No syntax error — just missing symbols (Error 72). Check `(**` / `*)` pairing anytime symbols vanish after doc edits. |
+| **Bare line numbers in plans/notes** (`Types.fst:1732`) | **Never do this.** They rot on the next insert/refactor and fail *silently* — the cited line still exists, just refers to something unrelated. Cite `file.fst: name_of_definition` instead; a name greps, a number cannot. If coordinates are unavoidable, record the commit they were true at. See §10. |
 
 ## 8. `(* *)` Regular Comment Premature Closure
 
@@ -189,7 +190,6 @@ This applies to BOTH regular comments `(* *)` and doc comments `(** *)`.
 Error 168 at or near EOF with no obvious cause → search for `*)` inside comments.
 
 ## 9. Lemma Count Audit
-
 Lemma counts in `@header`/coverage sections drift as lemmas are added and
 removed.  The count in the doc comment is manual prose — F* does not
 enforce it.
@@ -218,3 +218,58 @@ After ANY session that adds or removes lemmas:
 1. `grep -c '^let lemma_' file.fst`
 2. Update the doc comment header count
 3. Update any derived status-table count in the same commit
+
+## 10. Never carry bare line numbers in plans, notes, or task lists
+
+Verified 2026-11-01: a task list cited 11 sites as bare line numbers
+(`Types.fst:1732,1914,2108,…`).  **Every single one was wrong** — two edits had
+landed since they were captured (a module split, and a new `type` inserted
+~90 lines earlier).  What they pointed at:
+
+| cited | actually was |
+|---|---|
+| `1732` | a comment ending `Definitional within this module. *)` |
+| `1914` | `else let tag = Seq.index s 0 in` |
+| `2108` | `\| Inr (tl, n2) -> Inr (v :: tl, n1 + n2)` |
+
+The count was wrong too (26 sites, not 11; and 11 of those were trivial).
+
+### Why this is worse than an ordinary stale doc
+
+A stale *name* fails loudly — `Error 72`, identifier not found.  A stale *line
+number* **always resolves to valid text**, so it looks correct.  A reader who
+trusts it writes a confidently wrong table and has no signal that anything is
+amiss.  Silent failure is the whole problem.
+
+### The rule
+
+- Cite `module.fst: name_of_thing`, never `module.fst: 1234`.
+- If a coordinate is genuinely unavoidable, **record the commit** it was true
+  at, and say so next to it.
+- Treat any inherited list of line numbers as **suspect by default** and
+  re-derive before using it.
+
+### Re-derive with an owner-aware scan, not `grep -n`
+
+`grep -n` gives you the line but not *what it belongs to* — which is what a
+per-site verdict table actually needs:
+
+```python
+import re
+src = open('Data.Codec.Types.fst').read().split('\n')
+
+def owner(n):                      # nearest preceding top-level `let NAME`
+    for i in range(n - 1, -1, -1):
+        m = re.match(r'^let (?:rec )?([a-zA-Z_0-9]+)', src[i])
+        if m:
+            return m.group(1)
+
+for n, line in enumerate(src, 1):
+    if re.match(r'\s*rest_cond\s*=', line):        # or wfcv_prop, etc.
+        print(owner(n), n, line.strip()[:60])
+```
+
+This yields `('product', 1874, 'rest_cond = (fun (v1, v2) r ->')` — a name
+plus a bare-ish record field — and it also separates the *trivial* sites
+(`fun _ _ -> True`) from the ones that need a real decision, which the line
+list never did.
