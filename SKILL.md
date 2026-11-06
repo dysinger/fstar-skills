@@ -43,7 +43,8 @@ with C/OCaml/WASM extraction.  This skill is split into focused sub-skills.
 | Proof **needs rlimit 250+ and still fails** with all facts in context — suspect the *definition* (derive from an already-proved codec) | [fstar-proofs §89](fstar-proofs/SKILL.md) |
 | Is a hypothesis **necessary**? Refute it with a law-abiding model; assert the failure in CI | [fstar-proofs §90](fstar-proofs/SKILL.md) |
 | A **deletion test** went green suspiciously fast — control asserts the hypothesis, or a `let`-bound predicate won't unfold | [fstar-proofs §91](fstar-proofs/SKILL.md) |
-| "Should this be a **record field or a parameter**?" — a value-dependent law cannot inhabit a field (elaboration error, not a proof failure) | [fstar-proofs §92](fstar-proofs/SKILL.md) |
+| "Should this be a **record field or a parameter**?" — a value-dependent law cannot inhabit a field (elaboration error, not a proof failure); **forced ≠ useful**: also the vacuous and no-op-projection fold cases | [fstar-proofs §92](fstar-proofs/SKILL.md) |
+| Changing a decoder's **return type** (count → remainder/slice) and the induction fails at the IH with `dec_result _ s` vs `dec_result _ (slice s …)` — a **dependency-width** failure, not arithmetic | [fstar-proofs §93](fstar-proofs/SKILL.md) |
 | **Split a module** safely: `make check` does not track deps; `include` ≠ `open`; unclosed `(** *` swallows a file; tier closure | [fstar-2026.09.20 §10](fstar-2026.09.20/SKILL.md) |
 | Audit cross-module buffer layouts (F* ↔ C) | [fstar-proofs §33](fstar-proofs/SKILL.md) |
 | Audit admit()-bodied functions for buffer overflows | [fstar-proofs §34](fstar-proofs/SKILL.md) |
@@ -51,7 +52,7 @@ with C/OCaml/WASM extraction.  This skill is split into focused sub-skills.
 | Extract to C via KaRaMeL, Low\* buffers (≤ 2025.12.15) | [fstar-lowstar](fstar-lowstar/SKILL.md) |
 | Build, compile, nix derivations, OCaml extraction (≤ 2025.12.15) | [fstar-build](fstar-build/SKILL.md) |
 | Write documentation, fsdoc comments, module headers | [fstar-docs](fstar-docs/SKILL.md) |
-| Cite code locations in plans/notes — **never bare line numbers**; re-derive with an owner-aware scan | [fstar-docs §10](fstar-docs/SKILL.md) |
+| Cite code locations in plans/notes — **never bare line numbers**; re-derive with an owner-aware scan, and **never trust a carried total** | [fstar-docs §10](fstar-docs/SKILL.md) |
 
 ## Common Errors (by code)
 

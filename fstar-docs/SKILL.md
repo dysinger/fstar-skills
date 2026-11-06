@@ -273,3 +273,60 @@ This yields `('product', 1874, 'rest_cond = (fun (v1, v2) r ->')` — a name
 plus a bare-ish record field — and it also separates the *trivial* sites
 (`fun _ _ -> True`) from the ones that need a real decision, which the line
 list never did.
+
+### ⚠️ The scan above still undercounts — field-pattern matching has TWO blind spots
+
+Verified 2026-11-02, on the same file.  Running the scan above and trusting its
+total gave **25 literals / 51 sites**.  The truth was **27 / 54**.  Two literals
+were invisible, for two different reasons:
+
+| blind spot | example | the pattern that misses it |
+|---|---|---|
+| The record literal does **not** open with `= {` on the declaration's own line | `let sum … =` … `in` … `  {` (a bare `{` on a body line) | any `= {$`-anchored scan, including an "owner" walk-back keyed to `= {` |
+| The fields are **parameters**, not literal `field = …` lines | `custom` (`wfcv_prop_custom`, `rest_cond_custom` arrive as arguments) | any `^\s*wfcv_prop\s*=` scan |
+
+**So a field-pattern scan is necessary but not sufficient.**  Count record
+*literals* by a brace-depth scan keyed on **either** `= {` **or** a line whose
+stripped content is exactly `{`, attribute each to the nearest preceding
+top-level `let`, and exclude `type` declarations:
+
+```python
+import re
+def literals(path):
+    lines = open(path).read().split('\n')
+    out = []
+    for i, l in enumerate(lines):
+        if l.rstrip().endswith('= {') or l.strip() == '{':
+            for j in range(i, -1, -1):
+                if re.match(r'^(let|type)\b', lines[j]):
+                    if re.match(r'^let', lines[j]):
+                        out.append((j, i, re.match(r'^let\s+([A-Za-z0-9_]+)', lines[j]).group(1)))
+                    break
+    return lines, out
+```
+
+Then assert the invariant that makes the total checkable: **each literal
+carries exactly one `wfcv_prop` and one `rest_cond`**, so `sites == 2 ×
+literals`.  If that fails, the scan is wrong — not the file.
+
+### A carried TOTAL is not evidence either
+
+The failure mode repeated one level up.  F29 says do not carry line numbers;
+the same session produced **four different summary totals** (30/12/16/2/1,
+27/11/14/1/0, 26/11/14/0/1, 27/11/14/0/1) from the *same* table, each by a
+different reading, none by recomputing from source.  The tell that a total is
+guessed rather than computed is **that it changes between drafts**.
+
+- Recompute every total from source in the same command that writes it.
+- Show the arithmetic, not just the result (`28 + 11 + 14 + 1 = 54`).
+- State the reconciliation when rows and sites differ (`27 rows, 54 sites`).
+- If a reader cannot reproduce the number from the artifact, the number is
+  prose, not data.
+
+### Withdraw a claim you cannot re-verify — in writing
+
+Two claims made during that session were checked after being written and did not
+hold (a fabricated span-attribution bug; an early tally).  Both were **removed
+and the removal recorded**, rather than quietly edited out.  A research note
+that only ever accretes findings cannot be trusted: a retraction is the signal
+that the document is being checked.

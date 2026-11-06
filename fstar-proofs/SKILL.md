@@ -6666,3 +6666,113 @@ and no amount of proof engineering will help.
 **Rule:** before spending an hour proving, ask whether the statement fits in a
 field's quantifier. If the `requires` clause would need a variable bound inside
 that same clause, stop — the design is wrong, not the proof.
+
+### Corollary: the fold is *forced* for value-dependent props, and that is NOT the same as *useful*
+
+Verified 2026-11-02, by tabulating 27 `codec` literals.  Three distinct cases,
+and a table must name which one it is per site — "the fold is necessary"
+generalises to none of them:
+
+| case | example | what the fold does | how you can tell |
+|---|---|---|---|
+| **forced AND load-bearing** | `map_`: `wfcv_prop = f a == Some v` **and** the proof needs `v' == v` | folding is what makes `law_fwd` closable | delete the conjunct ⇒ `Failed to prove: v' == v` |
+| **forced but VACUOUS** | greedy `satisfy_many0`: `wfcv_prop = fun _ -> True` | adds `&& True` | a deletion test *cannot* register anything, because there is no difference (see §91) |
+| **forced but a NO-OP PROJECTION** | `label`: `wfcv_prop = c.wfcv_prop` and `wfcv = c.wfcv` | folds to `c.wfcv && c.wfcv` | the legacy `wfcv` is already the conjunct's projection |
+
+So: F31 (§92) tells you a value-dependent prop **cannot be a field**.  It does
+**not** tell you that moving it into `wfcv` changes the guard in any way that
+matters.  Decide the proof-side consequence separately, per site, and write the
+verdict down — a per-site table, not a rule of thumb.
+
+**Enumerating such a table:** for every record literal, list its `wfcv_prop` and
+`rest_cond` and give each a written disposition.  Two counting traps, both of
+which produce a table that looks complete and is not — see
+[fstar-docs §10](../fstar-docs/SKILL.md): a literal that opens its record on a
+*body* line (`let sum … = … in {`), and a literal whose fields arrive as
+*parameters* (`custom`).  Assert `sites == 2 × literals` as the invariant.
+
+---
+
+## 93. Changing a decoder's RETURN TYPE breaks the induction at the IH — it is a dependency-width failure, not arithmetic
+
+Verified 2026-11-05.  The tell is confusing because it looks like the proof is
+*almost* right: every fact is in context, the arithmetic is trivial, and the
+goal fails anyway (§89's signal).  It is **not** §89.  Redefining does not help
+here; the return type has to be the thing you change.
+
+### The situation
+
+You have a library decoder that returns a **count**:
+
+```fstar
+val dec : (s: byte_seq) -> decode_result a       (* Inr (v, n) : n bytes consumed *)
+```
+
+and a new record whose field must return the **remainder** instead:
+
+```fstar
+dec : (s: byte_seq) -> Tot (option (a & remainder s))    (* r : |r| <= |s| *)
+```
+
+So you rewrite the decoder so its recursive call threads the slice
+`Seq.slice s k (|s|)`.  Now the induction fails with:
+
+```
+Error 19: Expected type  dec_result unit s
+          got type       dec_result unit (Seq.slice s 1 (Seq.length s))
+          Failed to prove: |r| <= |slice s 1 (|s|)|  <==>  |r| <= |s|
+```
+
+**This is a dependency-width failure.**  The *type of the recursive call*
+mentions a different sequence than the *declared return type* of the enclosing
+function.  For the induction hypothesis to apply, the recursive call's type must
+be literally `dec_result unit s` — the same `s`.  When the type depends on the
+argument, `s ≠ slice s 1 (|s|)` **definitionally**, so the IH does not match and
+no lemma about lengths can rescue it.
+
+### Why the obvious cures do not work (all four tried, all failed)
+
+| cure | why it fails |
+|---|---|
+| add `Seq.lemma_len_slice` before the call | closes `\|r\| <= \|slice\|` but leaves `dec_result … sq` vs `dec_result … (slice sq …)` — the error just moves to the *type* goal |
+| add `lemma_split_head sq` (rewrite `sq` to `cons … ++ slice …`) | rewriting happens *after* the recursive call's type was already elaborated |
+| thread a second parameter `sq` refined `\|sq\| = \|s\|` and recurse on `(slice s …) (slice sq …)` | same mismatch, now on `sq`; the refinement relates lengths, not the opaque `sq` and `slice sq …` |
+| restate the lemma over a `match`s / `if`s that avoid `cons`-rebuilding | fixes the *goal* shape, not the *call type* |
+
+**Rule.** If a callee's return type is indexed by an argument (`t s`), the
+recursive call must be at the **same** `s`.  You cannot change return type
+mid-recursion by supplying an equal-but-different argument.  Options, in order:
+
+1. **Keep the recursion on `s` and return the count** (the library's shape),
+   then convert count → remainder **once, outside** the recursion, where
+   `Seq.lemma_split` applies.  This is the cheap route and it is why fixed-width
+   leaves (`uint8`) are trivial: their count is a *literal*, so the remainder is
+   `slice s 4 (|s|)` with no variable at all.
+2. **Make the index a binder the type does not depend on** — e.g. return
+   `(a & nat)` plus a *separate* proof that the count is in bounds, so the
+   recursive type is stable.  This is the design that actually works when the
+   caller needs the slice; it costs a companion lemma, not a redesign.
+3. Do not try to thread it implicitly.  The four failures above are the search
+   space; there is no fifth.
+
+### The diagnostic, in one line
+
+> If the goal is `dec_result _ s` vs `dec_result _ (slice s …)`, the problem is
+> **the return type's dependency on the argument**, and no amount of length/slice
+> arithmetic will close it.  Change the shape, not the proof.
+
+### Corollary — do not conflate this with §89
+
+§89 says a definition is wrong when the goal is your *own non-recursive `let`*
+unfolding.  Here the definition is fine and non-recursive; what is wrong is that
+**the new type is not inhabited by the old recursion**.  The symptom (facts in
+context, goal will not close) is identical, so check which one you have before
+picking a remedy: §89 fixes a definition, §93 fixes a *signature*.
+
+### What this cost
+
+An hour of probing on four leaves (`bytes`, `varint`, `digits_to_int`,
+`word16*`) that all hit the same wall, each time re-derived from scratch because
+the first diagnosis was written down as "SMT normalisation" rather than as a
+*type mismatch*.  Read the error's `Expected type … got type …` line literally:
+when the two types differ in the **index**, it is §93, full stop.
