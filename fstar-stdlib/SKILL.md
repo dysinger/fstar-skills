@@ -82,6 +82,36 @@ Seq.append_assoc (Seq.create 1 b) s_tl rest
 - `Seq.slice` has refinement `j:nat{i <= j /\ j <= length s}`. SMT may fail to prove `j <= length s` when `j` is a `U32.v` value. Use `forall`+`Seq.index` patterns for buffer preservation instead.
 - `seq_of_list` return type refinement: `List.length l == length s`. This refinement is NOT automatically propagated through `let` bindings — call `lemma_seq_of_list_length` to expose it.
 - `Seq.cons x s` is definitionally `Seq.append (Seq.create 1 x) s`.
+- **`Seq.lemma_eq_intro` needs the LENGTHS discharged first, not the indexes.**
+  Its precondition is a *conjunction* — `length s1 = length s2 /\ forall i.
+  index ...` — and SMT will not discharge the length side from a slice goal on
+  its own when the sequences are **nested appends**.  The shape that fails:
+
+  ```fstar
+  (* FAILS: slice of a nested append; lengths never established *)
+  let lemma_slice2_rem (h l: byte) (r: byte_seq) : Lemma
+    (ensures Seq.slice (Seq.append (Seq.append (Seq.create 1 h) (Seq.create 1 l)) r)
+                       2 (Seq.length r + 2) == r)
+    = Seq.lemma_eq_intro (Seq.slice ... ) r
+  ```
+
+  The fix is to list `lemma_len_append` for **every** nested append, innermost
+  first, before `lemma_eq_intro`:
+
+  ```fstar
+  let lemma_slice2_rem (h l: byte) (r: byte_seq) : Lemma
+    (ensures Seq.slice (Seq.append (Seq.append (Seq.create 1 h) (Seq.create 1 l)) r)
+                       2 (Seq.length r + 2) == r)
+    = let s = Seq.append (Seq.append (Seq.create 1 h) (Seq.create 1 l)) r in
+      Seq.lemma_len_append (Seq.append (Seq.create 1 h) (Seq.create 1 l)) r;
+      Seq.lemma_len_append (Seq.create 1 h) (Seq.create 1 l);
+      Seq.lemma_eq_intro (Seq.slice s 2 (Seq.length r + 2)) r
+  ```
+
+  Verified 2026-11-07: this closed four `law_fwd`s (two widths x two
+  endiannesses) at default rlimit.  **A slice theorem without the lengths is a
+  theorem SMT cannot fire** — and the failure reads as "Failed to prove an
+  `index` equality", i.e. it points at the indexes, not the lengths.
 
 ---
 

@@ -6539,13 +6539,37 @@ different in value:
 
 Aim for one of the first two. A counterexample is a *result*, not a setback.
 
-## 91. A "control" that asserts the hypothesis under test is a TAUTOLOGY — two false-green traps
+### A contrast module that contradicts the stated CAUSE means the cause is WRONG
+
+Added 2026-11-05, after a re-diagnosis that cost a session.  A note had
+recorded: "with `enc` as a record **field**, SMT does not identify `e` with
+`enc x`'s value", and cited as *support* a standalone module in which the
+*same statement with a plain-function `enc` verifies*.  That contrast does not
+support the field theory — it **refutes** it.  The real cause was different and
+larger (§94: an `exists` is not introduced automatically **unless the witness
+is a term already named in context** — which fails with no record and no
+refinement at all).
+
+The failure mode is subtle: the contrast module was written to show "it works
+over here", and it was read as "so the difference is the field".  But the
+conclusion only follows if the field is the *only* difference, and it was not.
+
+**Rule.** When you write a contrast module, ask: *does the contrast isolate
+the one variable my theory names?*  If the contrast is a **strictly simpler**
+setting that still fails, your cause is not just narrower — it is a phantom,
+and the mechanism is somewhere you have not probed.  Record the probe result,
+not the story that motivated it.
+
+## 91. A "control" that asserts the hypothesis under test is a TAUTOLOGY — three false-green traps
 
 Verified 2026-11-02 while running per-site deletion tests on a codec's
-well-formedness guard. **Both mistakes below produced a GREEN build and looked
-like evidence. Neither was.** A deletion test is only worth running if you
-actively defend against these two, because they fail in the *safe* direction —
-they make you believe a hypothesis is redundant.
+well-formedness guard; **Trap 3 added 2026-11-07**. **Each mistake below produced
+a GREEN build and looked like evidence. None was.** A deletion test is only
+worth running if you actively defend against all three, because they fail in the
+*safe* direction — they make you believe a hypothesis is redundant.
+
+All three share one structure, which is the thing to watch for: **the experiment
+leaves the fact under test in the context.**
 
 ### Trap 1 — the control asserts what it is supposed to prove
 
@@ -6588,6 +6612,35 @@ is not substituted into the redex.
 **Rule:** in a deletion test, inline the predicate into the record field. Do not
 route it through a `let`. If you must share it, prove a `lemma_*_eq` accessor and
 call it explicitly — never rely on SMT to unfold the binding.
+
+### Trap 3 — blanking a lemma's BODY while keeping its STATEMENT is not a deletion test
+
+Verified 2026-11-07 on the four fixed-width `law_bwd`s.  To ask "is this helper
+lemma load-bearing?", the obvious edit is to replace its body with `()`, keeping
+the signature:
+
+```fstar
+let lemma_recompose16_be (n: int) : Lemma
+  (requires 0 <= n /\ n < 65536)
+  (ensures U8.v (...) * 256 + U8.v (...) == n)
+  = ()    (* <-- body "deleted", statement KEPT *)
+```
+
+Five of seven helpers "passed" this test — the module still verified — which
+reads as *dead code*.  **It is not.**  A lemma whose statement is still in scope
+still **guides SMT**: the fact is in the context whether or not its body proved
+it.  The statement is the contribution.
+
+Removing the lemma **and every call site** failed for all seven.  Every helper
+was load-bearing.
+
+**Rule:** a deletion test deletes the *declaration*, not the proof term.  If the
+signature survives, you have measured nothing.  The tell that you are in this
+trap: the "deleted" lemma still has an `ensures` that SMT can use.
+
+(This is the third member of one family with Traps 1 and 2 — a green build that
+looks like evidence and is not.  The common structure: the experiment leaves the
+thing under test *in the context*.)
 
 ### The positive pattern, when you must distinguish two fields
 
@@ -6776,3 +6829,439 @@ An hour of probing on four leaves (`bytes`, `varint`, `digits_to_int`,
 the first diagnosis was written down as "SMT normalisation" rather than as a
 *type mismatch*.  Read the error's `Expected type … got type …` line literally:
 when the two types differ in the **index**, it is §93, full stop.
+
+### Route 1, worked end-to-end (added 2026-11-05)
+
+Option 1 above was claimed but not demonstrated when this entry was written.  It
+is now proved on a real decoder (`bytes`, both laws, **default rlimit**, no
+`#push-options`):
+
+```fstar
+(* the library's own recursion, unchanged — result type does NOT mention `s` *)
+let rec bytes_count (bs: list byte) (s: byte_seq) : Tot (option (unit & nat)) = …
+
+(* a REFINED ACCESSOR: the bound becomes a fact about a VALUE, so the
+   conversion below is a plain `match`, never an `if` *)
+let bytes_consumed (bs: list byte) (s: byte_seq) : Tot (n:nat{ n <= Seq.length s }) =
+  lemma_bytes_consumed_le bs s;
+  match bytes_count bs s with None -> 0 | Some (_, n) -> n
+
+(* the conversion, once, outside the recursion *)
+let bytes_rem (bs: list byte) (s: byte_seq) : Tot (dec_result unit s) =
+  let n = bytes_consumed bs s in
+  match bytes_count bs s with
+  | None -> None
+  | Some (v, _) -> Some (v, Seq.slice s n (Seq.length s))
+```
+
+Two things make it work, and neither is obvious from "return the count":
+
+1. **The bound must be a refined accessor, not an `if`.**  Writing
+   `if n <= |s| then Some (v, slice s n |s|) else None` leaves an `if` in the
+   reduct, and SMT then will **not** invert the equation in `law_bwd` —
+   measured: with the `if`, every sub-fact (`r == slice s n`,
+   `s == append (slice s 0 n) r`, `count … = Some ((), n)`) closes, and the
+   final goal still fails.  **An in-bounds check must be justified, not tested.**
+2. **`law_bwd`'s `exists` needs a witness — but `exists_intro` is only
+   mandatory when the witness is COMPUTED** (e.g. `slice s 0 n`).  If the
+   proof has already NAMED it, SMT closes the `exists` itself; four
+   fixed-width `word*` `law_bwd`s verify with no `exists_intro` at all.  See
+   §94's sharpening.
+
+Keep the recursion's result type *free of the argument*; carry every bound by
+refinement on a returned **value**.  That is the whole of route 1.
+
+---
+
+## 94. An `exists` goal is not introduced automatically unless the witness is NAMED in context
+
+Verified 2026-11-05 (continues §93; refutes a diagnosis recorded there).
+
+### The signal
+
+A `Lemma` whose `ensures` is an existential fails with a type goal, not an
+arithmetic one:
+
+```
+Error 19: Subtyping check failed
+  Expected type _: unit { exists (e: byte_seq). enc v = Some e /\ ... }
+  got type Prims.unit
+  Failed to prove: exists (e: byte_seq). enc v = Some e /\ ...
+```
+
+Every ingredient is in context — the `dec` equation, the split, the lengths —
+and the goal still will not close.  Unlike §93 the failing type is not indexed
+differently; the existential is simply **unwitnessed**.
+
+This holds even with **no record, no refinement, and no dependency at all**:
+
+```fstar
+let e0 (u: unit) : Tot (option byte_seq) = Some s0
+let a (v: unit) : Lemma (ensures (exists (e: byte_seq). e0 v = Some e)) = ()
+(* Error 19: the exists is never witnessed *)
+```
+
+⚠ **But "never" is too strong — read the SHARPENING below before concluding you
+need `exists_intro`.**  The trigger is whether the witness is *named*, and this
+example's proof body is bare: it asserts nothing, so nothing names `s0` as the
+witness.  Add one `assert (e0 v = Some s0)` and the same goal verifies.
+
+### The cure
+
+```fstar
+open FStar.Classical
+let a (v: unit) : Lemma (ensures (exists (e: byte_seq). e0 v = Some e))
+  = exists_intro (fun (e: byte_seq) -> e0 v = Some e) s0
+```
+
+The predicate argument is required — `exists_intro s0 ...` gives
+`Error 189: expected expression of type _: byte_seq -> prop`.
+
+### What this refutes, and why it matters
+
+A record field does **not** obstruct inversion of `enc x = Some e`.  Given the
+encoding as a *named function* plus a companion lemma stating the equality,
+`e` is identified normally:
+
+```fstar
+let bytes_enc (bs: list byte) (u: unit) : Tot (option byte_seq) = Some (seq_of_list bs)
+let lemma_bytes_enc_eq (bs: list byte) (e: byte_seq) : Lemma
+  (requires bytes_enc bs () = Some e) (ensures e == seq_of_list bs) = ()
+```
+
+So "with `enc` as a record field, SMT does not identify the hypothesised `e`"
+is **wrong as a mechanism**.  The block was the missing witness all along.
+
+**Rule.** If the goal is `exists …` and all non-existential facts are already
+in context, the fix is an explicit witness.  Before inventing a
+field/opacity/refinement theory, try `exists_intro` first — it is one line.
+
+### ⚠ Sharpened (verified 2026-11-07): "never" is too strong — the trigger is whether the witness is NAMED
+
+The section title says *never*, and the counterexample above is real, so this
+was not wrong — but it is **not the whole rule**, and the difference is what
+decides whether a `law_bwd`-shaped proof needs one line or none.  Measured on
+the same shape:
+
+```fstar
+(* FAILS — the `exists` is unwitnessed (the original counterexample) *)
+let a (v: unit) : Lemma (ensures (exists (e: byte_seq). e0 v = Some e)) = ()
+
+(* VERIFIES — the same goal, but a fact NAMING the witness is in context *)
+let b (v: unit) : Lemma (ensures (exists (e: byte_seq). e0 v = Some e))
+  = assert (e0 v = Some s0)
+
+(* VERIFIES — same thing through a NAMED LOCAL *)
+let c (v: unit) : Lemma (ensures (exists (e: byte_seq). e0 v = Some e))
+  = let e = s0 in assert (e0 v = Some e)
+```
+
+**F\* introduces the `exists` iff the witness is a term already present in the
+goal's context.**  If the proof has *named* it (`s0`, or a local), SMT
+instantiates; if the encoding is only reachable through lemmas about a
+*computed* value, it cannot.
+
+This is what distinguishes two real cases, both `law_bwd`:
+
+| leaf | witness | `exists_intro`? |
+|---|---|---|
+| fixed width (`word16*`/`word32*`) | `create s[0] ++ create s[1]` — mentioned by the conjuncts | **not needed** (four such laws verify without it) |
+| `bytes` | `Seq.slice s 0 n` for a **computed** `n` | **needed** |
+
+So the operational rule is: **state the conjuncts as separate `assert`s that
+name the witness first; only if the witness is computed (and so unnamed) reach
+for `exists_intro`.**  Trying it without costs nothing and is one compile;
+adding it reflexively is noise that hides which case you are in.
+
+### Corollary — the "justify, do not test" rule for a refined return
+
+A conversion that must carry a refinement should obtain it from a **refined
+accessor**, not from an `if`:
+
+```fstar
+let bytes_consumed (bs: list byte) (s: byte_seq) : Tot (n:nat{ n <= Seq.length s }) =
+  lemma_bytes_consumed_le bs s;
+  match bytes_count bs s with None -> 0 | Some (_, n) -> n
+```
+
+Writing `if n <= Seq.length s then … else None` instead leaves an `if` in the
+reduct, and SMT will **not** invert the resulting equation in a `requires`.
+Measured: with the `if`, `r == slice s n`, `s == append (slice s 0 n) r` and
+`bytes_count bs s == Some ((), n)` *each* close, and the final `exists` still
+fails; with the refined accessor, one `exists_intro` closes it.
+
+---
+
+## 95. Before declaring a solver/toolchain blocker, look for a COUNTEREXAMPLE to the obligation
+
+An entire session was spent building a "Z3 numeric-literal incompleteness"
+theory — a failing query, two Z3 versions, `arith.solver` variants, a
+"workaround" — around this lemma:
+
+```fstar
+let f (x: int) : Lemma (requires x < 16400) (ensures x < 16384) = ()
+```
+
+It fails because **it is false** (`x = 16390`).  Nothing was broken.
+
+The tell was available and ignored: the *reverse* direction
+(`x < 100 ==> x < 10`) also "failed" — which is also correct.  Consistency
+across both directions was read as confirming a bug instead of confirming a
+bad test.
+
+**Rule.** When an obligation will not close and you are about to blame the
+solver, the toolchain, a literal, or the encoding, first spend two minutes
+trying to make the statement **fail for a concrete reason**: instantiate every
+variable with a value that should break it.  If you find one, you were proving
+a false statement.  If you cannot, you now have evidence the statement is true
+and can look at the proof.
+
+This is §90 ("refuting a hypothesis is a first-class activity") applied to
+*your own goal* rather than to a design hypothesis.  It also settles arguments
+in minutes that a diffused "the solver is odd" theory can burn a session on:
+in the same project, `lemma_lockstep`'s obvious form was refuted in minutes
+because this check was run first, while 95's example cost a session because it
+was not.
+
+### Corollary — check the obligation against the DATA, not against intuition
+
+The most useful counterexamples are concrete byte strings / inputs, not
+abstract ones:
+
+```
+s = [0x80;0x80], t = [0x80;0x80;0x01], k = 2   ->  None vs Some (1, 3)
+```
+
+That two-line check showed a transfer lemma's natural form was false, before
+any proof effort went into it.
+
+---
+
+## 96. A decoder that accepts NON-IMAGE input breaks `law_bwd` — check canonicality before proving
+
+A `codec_v2`-style backward law is
+
+```fstar
+law_bwd : dec s = Some (v, r) ==> exists e. enc v = Some e /\ s == e ++ r
+```
+
+This is **not** a property of the codec's fields; it is a property of the pair
+`(enc, dec)`, and it fails whenever `dec` accepts an input that `enc` never
+produces.
+
+Concrete case (LEB128 `varint`): `dec [0x80; 0x00] = Some (0, [])` because
+`0x80` is a continuation carrying group `0` and `0x00` terminates — but
+`enc 0 = Some [0x00]`, length 1.  With `r = []` the law forces `|e| = |s| = 2`
+against `|e| = 1`, so `law_bwd` is **false**.  Canonical encoding and a
+permissive decoder are incompatible with a strict backward law.
+
+**Two consequences for any per-field disposition table:**
+
+1. It **cannot see this**.  A table that asks "does `wfcv` / `wfcv_prop` /
+   `rest_cond` / `roundtrip` survive `codec_v2`?" can answer every row
+   correctly and still be wrong about the leaf, because the defect lives in the
+   decoder's *acceptance language*.
+2. So run an explicit sweep, per leaf: **is `dec`'s domain exactly `enc`'s
+   image?**  Overlong forms, leading-zero forms, alternate encodings of the same
+   value, and trailing-garbage acceptance are the usual culprits.
+
+**If it is not canonical, there is no proof to write — there is a decision:**
+canonicalise the decoder (a *behaviour change*, requiring a consumer audit) or
+record the codec as an exception to the law (breaking composition).  Do not
+start the proof.
+
+### The sweep pays for itself: two witnesses in one library
+
+Run on the seven leaf codecs of `fstar-codec` (2026-11-07), it found the
+expected one (`varint`) **and a second nobody predicted** (`digits_to_int`):
+
+```
+"01"  ->  Some (1, 2)      while  enc 1 = [0x31], length 1
+[0x80;0x00] -> Some (0, 2) while  enc 0 = [0x00], length 1
+```
+
+Both are the **same defect class: the decoder is permissive about NUMBER
+REPRESENTATION** (leading zeros, overlong groups) while the encoder emits the
+unique shortest form.  So on any numeric leaf, check that first.
+
+**The cheap test, which needs no induction.**  Most decoders fall in one of two
+shapes, and only the second can be defective:
+
+| decoder shape | canonical? | why |
+|---|---|---|
+| consumes `k` bytes, `k` fixed or `= |enc v|` unconditionally, then compares/reconstructs | **yes** | a success *is* the image, by construction |
+| consumed count depends on the input's **shape** (stops at a non-digit, continues while a continuation bit is set) | **must be checked** | the tail is chosen by the bytes, not by the value |
+
+The clean leaves are clean for this reason (`text` consumes `|enc|` and
+compares; `word16*`/`word32*`/`uint8` are fixed width).  State the sweep as two
+positive lemmas per leaf — "what `dec` reads re-encodes to the consumed prefix"
+and "any success has `n = |enc v|` and those bytes are `enc v`" — and let the
+second one *fail* if the leaf is defective; a failing sweep lemma is a result,
+not a proof obligation.
+
+---
+
+## 97. Cost findings for proofs over big-int encoders (4-fold speedups, no statement change)
+
+Three independent changes each cut solver time by an order of magnitude with
+**identical statements and identical steps**:
+
+| change | before | after |
+|---|---|---|
+| port `lemma_nbytes_of_varint_correct` instead of stubbing it `= ()` | 218 s | 18 s |
+| split `lemma_Xbyte_arithmetic` into `lemma_id_N` (identity) + range conjunct | 65 s | 6 s |
+| state one-byte **peel lemmas** for the recursive decoder instead of unrolling | no convergence | cheap |
+
+1. **An opaque stub is not free.**  `= ()` for a lemma whose statement
+   characterises the *encoder's output bytes* forces SMT to re-derive that
+   output inside every consumer.  Port the branches.
+2. **Split identity from range.**  `n == Σ groups /\ n / 2^21 < 128` as one
+   `ensures` is much harder than the identity alone; the range conjunct is
+   normally discharged by the caller's own hypotheses anyway.
+3. **Peel, do not unroll.**  For a decoder recursing over bytes with fuel,
+   state `decode (p) = decode (p+1) …`-style step lemmas and chain them; asking
+   Z3 to unroll four nested `if`s at once does not converge at any rlimit.
+
+Diagnostic: if raising `--z3rlimit` does not help but the goal *looks* like
+arithmetic, suspect a missing characterisation lemma (§89's spirit).
+
+---
+
+## 98. `FStar.Mul` does not exist in F\* >= v2026.09.20 — and the LSP tool will not tell you
+
+Verified 2026-11-07.  In F\* <= 2025.12.15, `open FStar.Mul` is how you make
+`*` multiply (§35, §4 of `fstar-lang`).  In **F\* >= v2026.09.20** the module is
+**gone**: the ulib has `FStar.Math`, `FStar.Math.Lemmas`, `FStar.Int`, … and no
+`FStar.Mul`.
+
+```
+* Error 134: Namespace 'FStar.Mul' cannot be found.
+* Warning 285: No modules in namespace FStar.Mul and no file with that name either
+```
+
+**The fix is `open FStar.Math.Lemmas`** — and the reason is subtler than
+"the module moved".
+
+`open FStar.Math.Lemmas` brings `op_Multiply` into scope *as a usable infix
+`*` for `int`*.  Concretely, tested with the real `fstar.exe` on
+v2026.09.20:
+
+| you write | result |
+|---|---|
+| `open FStar.Mul` | `Error 134: Namespace 'FStar.Mul' cannot be found` |
+| `open FStar.Math.Lemmas` + `2 * pow2 (n - 1)` | **works** |
+| no `open` + `2 * pow2 (n - 1)` | `Error 189: Expected expression of type Type got 2` |
+| `Prims.op_Multiply a b` | `Error 72: Identifier not found: op_Multiply` |
+
+So in >= v2026.09.20 the `open` is **still required**, exactly as in <=
+2025.12.15 — only the module's NAME changed (`FStar.Mul` -> `FStar.Math.Lemmas`).
+`op_Multiply` is not a name you can refer to directly; it is what the `open`
+makes `*` mean.
+
+### ⚠⚠ The LSP tool and `fstar.exe` DISAGREE about this idiom — in BOTH directions
+
+Measured 2026-11-07 on the *same* 6-line module:
+
+| idiom | `fstar_check` (LSP) | `fstar.exe` (runner) |
+|---|---|---|
+| `open FStar.Mul` + `2 * f (n-1)` | green | `Error 134` |
+| **no `open`** + `2 * f (n-1)` | **green** | `Error 189` |
+| `open FStar.Math.Lemmas` + `2 * f (n-1)` | **`Error 189`** (false negative!) | **green** |
+| `Prims.op_Multiply` | green | `Error 72` |
+
+Read that third row again: the **correct** code is the one the LSP tool
+**rejects**, and the incorrect code is what it **accepts**.  So neither tool is
+a reliable oracle for this construct, and "it's green in the LSP" means
+nothing here either way.
+
+**Escalating cost, measured this session:** two modules were "verified" by
+`fstar_check`, committed, and only failed when the runner swept the suite —
+three separate rounds (Error 72 -> 71 -> 134 -> 189) were spent on this one
+idiom.
+
+**Rules.**
+1. For anything involving `*` on `int`/`nat`, trust **`fstar.exe` only**.
+2. Never report "N modules verify" from `fstar_check` runs.  Run the runner.
+3. When the LSP and the runner disagree, the runner wins — always.
+
+### Two smaller traps hit in the same session
+
+1. **`let` inside an `ensures` blocks inversion.**  Writing
+   `(ensures (let v = f s in enc v == slice s 0 2))` fails to prove, while the
+   same claim with `f s` inlined proves.  The `let`-bound variable is opaque to
+   SMT (§91 trap 2).  Inline the expression.
+2. **`exists_intro` with a witness that is a `Seq.create`** forces SMT to
+   compare the *element* rather than its normalised form
+   (`create 1 (index s 0) == slice s 0 1` is trivial, but
+   `create 1 (uint_to_t (nat_of_int (index s 0))) == create 1 (index s 0)`
+   is not).  State the direct equality and close it with `Seq.lemma_eq_intro`;
+   reach for `exists_intro` only when the `ensures` is genuinely existential.
+
+---
+
+## 99. "Weaken the law so the permissive decoder fits" is a DEAD END — the dichotomy
+
+Verified 2026-11-07, immediately after §96.  Having found a non-canonical
+decoder, the tempting third option is: *keep the decoder, weaken the law*.
+It is refuted, and cheaply — do not re-open it.
+
+### The two weakened laws people try, and what each does
+
+Given `law_bwd : dec s = Some (v, r) ==> exists e. enc v = Some e /\ s == e ++ r`
+and a decoder that accepts non-image input:
+
+| attempt | scalar claim | composition |
+|---|---|---|
+| `exists e. dec e = Some (v, []) /\ s == e ++ r` (witness = the decoder's own answer) | **TRUE** | **fails** |
+| `enc` as a relation `enc_r : a -> seq -> prop` | depends on `enc_r` | fails on both horns |
+
+### Why composition kills the first
+
+`product`'s `law_bwd`, at each component and after eliminating that
+component's existential, consumes exactly one fact:
+
+```
+STEP : c.dec p = Some (v, [])  ==>  c.enc v = Some p
+```
+
+The weakened law hands you the **premise** of STEP at `r = []`, and nothing
+else.  So the composition does not go through.  State STEP explicitly — it
+makes the gap a one-line fact instead of a vague worry.
+
+### Why the relation form is a dichotomy (both horns proved)
+
+| `enc_r` | STEP provable? | `law_bwd` |
+|---|---|---|
+| `fun _ _ -> True` | yes, vacuously | provable for **any** decoder, including a permissive one — the law constrains nothing, so `law_fwd` must still be assumed per composite |
+| a canonical encoder's relation | **no** — false for the permissive decoder | false with it |
+
+There is no middle: a relation loose enough to admit non-image input also
+admits everything, and one tight enough to mean something rejects the input
+that motivated the weakening.  A third relation was searched for and not
+found.
+
+**Rule.** When §96 says "there is a decision, not a proof", the decision has
+exactly **two** live branches — canonicalise the decoder, or record the codec
+as an exception.  "Weaken the law" is not a third branch.  Refuting it takes
+about 50 lines (a vacuous-relation model + a `product` STEP statement) and
+saves a session of speculation.
+
+### Also measured: the decoder fix is one `if`, but the *predicate* is the work
+
+Canonicalising a decoder is a single conjunct.  Getting the conjunct **right**
+is where the time goes, and a wrong one can look green:
+
+- The obvious conjunct was placed on the wrong branch (the terminator) and was
+  **dead**: with a digit budget of 10 the fuel is spent on digits, so the
+  end-of-input branch fires first.  The pointwise step lemmas all closed; only
+  the **whole-verdict** query (`dec "01" = None`) exposed it.
+- The working invariant was not "the leading byte is `'0'`" but
+  **"the value fits in one digit yet more than one digit was consumed"**
+  (`a < 10 && i > 1`) — because at the accepting state the accumulator is the
+  *value*, not the leading byte.
+
+**Two rules.** (1) For any decoder change, state the whole-verdict input/output
+lemma, never only the steps.  (2) Prefer an invariant over the *decoder state*
+(accumulator + position), not over the raw input — the state is what the
+branches actually test.
+

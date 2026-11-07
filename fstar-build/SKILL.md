@@ -445,3 +445,86 @@ local language-client extension whose `command` is `fstar.exe --lsp` over stdio.
 typechecking is LOOSER than `fstar.exe --z3rlimit 80` (see fstar-proofs §47/§52:
 "LSP is looser than nix").  Editor diagnostics/hover are convenient, but the
 full build with a Z3 resource limit is the source of truth.
+
+## 10. Grep-based gates in a spike/test runner: two ways they silently do nothing
+
+Verified 2026-11-07 on a spike runner whose job is to prove "0 admits, no
+resource-limit escape" across a directory of evidence modules.  **Both bugs
+below made the gate report `clean` while checking the wrong files.**  A gate
+that never fires is worse than no gate: it certifies.
+
+### Bug 1 — the file glob does not match the files you check
+
+The runner verified modules by an explicit list but gated with a glob:
+
+```bash
+fstar.exe ... ModuleA.fst ModuleB.fst   # verified: listed explicitly
+grep -nE 'admit' "$here"/spike-*.fst    # gated:   only names starting "spike-"
+```
+
+Every evidence module not named `spike-*` (route probes, counterexample
+modules, sweep modules, refutation modules) was **outside the gate**.  An
+`admit` — or a `#push-options --z3rlimit 900` — added to any of them would
+have passed.
+
+**Rule:** derive the gate's file list from the SAME variable the verification
+loop consumes, never from a second pattern:
+
+```bash
+verified_srcs=()
+for entry in $mods $refutations; do verified_srcs+=("$here/${entry%%:*}"); done
+grep -nE 'admit' "${verified_srcs[@]}"
+```
+
+Then the two cannot drift.  A grep glob is a *second* definition of "the set
+of files", and two definitions drift.
+
+### Bug 2 — a non-greedy comment stripper closes at an INNER `*)`
+
+To avoid flagging the *word* `admit` in prose, the gate stripped comments
+with `re.sub(r'\(\*.*?\*\)', '', src, flags=re.S)`.  F\* comments **nest**,
+and an inline `(* ... *)` inside a header block:
+
+```
+(* ===========================================================================
+   ... if b < 128 then Inr (v', p + 1)      (* terminate at a final group *)
+   ...
+   No admit, no assume val, no #push-options over 400.
+   =========================================================================== *)
+```
+
+makes the non-greedy regex stop at the **inner** `*)`.  Everything after it in
+the header is then scanned as **code**, and the prose line
+`No admit, no assume val, ...` is reported as a finding.  The fix for the
+comment stripper is a depth counter, not a cleverer regex:
+
+```python
+def strip_comments(s):
+    out, i, n, depth = [], 0, len(s), 0
+    while i < n:
+        if s.startswith('(*', i):        depth += 1; i += 2; continue
+        if depth and s.startswith('*)', i): depth -= 1; i += 2; continue
+        if depth:
+            out.append('\n' if s[i] == '\n' else ' '); i += 1; continue
+        if s.startswith('//', i):
+            k = s.find('\n', i)
+            if k < 0: break
+            i = k; continue
+        out.append(s[i]); i += 1
+    return ''.join(out)
+```
+
+Keep line structure (emit `\n` for comments' newlines) so reported line
+numbers stay true.
+
+### Always prove the gate both ways
+
+A gate is only evidence if you have watched it **fire**.  Test it directly:
+
+```bash
+printf 'module T\nlet f () : Tot int = admit ()\n'  > /tmp/p1.fst   # expect exit 1
+printf 'module T\n(* nested (* admit *) *)\nlet f () : Tot int = 1\n' > /tmp/p2.fst  # expect exit 0
+```
+
+If the first exits 0 the regex is wrong; if the second exits 1 the stripper is
+wrong.  Both directions, every time the checker is edited.

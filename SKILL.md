@@ -42,10 +42,19 @@ with C/OCaml/WASM extraction.  This skill is split into focused sub-skills.
 | A law that **fails in both `match` branches** — missing antecedent vs too-weak law | [fstar-proofs §88](fstar-proofs/SKILL.md) |
 | Proof **needs rlimit 250+ and still fails** with all facts in context — suspect the *definition* (derive from an already-proved codec) | [fstar-proofs §89](fstar-proofs/SKILL.md) |
 | Is a hypothesis **necessary**? Refute it with a law-abiding model; assert the failure in CI | [fstar-proofs §90](fstar-proofs/SKILL.md) |
-| A **deletion test** went green suspiciously fast — control asserts the hypothesis, or a `let`-bound predicate won't unfold | [fstar-proofs §91](fstar-proofs/SKILL.md) |
+| A **deletion test** went green suspiciously fast — three traps: the control asserts the hypothesis, a `let`-bound predicate won't unfold, or you blanked a lemma's **body** but kept its **statement** (the statement alone guides SMT) | [fstar-proofs §91](fstar-proofs/SKILL.md) |
 | "Should this be a **record field or a parameter**?" — a value-dependent law cannot inhabit a field (elaboration error, not a proof failure); **forced ≠ useful**: also the vacuous and no-op-projection fold cases | [fstar-proofs §92](fstar-proofs/SKILL.md) |
 | Changing a decoder's **return type** (count → remainder/slice) and the induction fails at the IH with `dec_result _ s` vs `dec_result _ (slice s …)` — a **dependency-width** failure, not arithmetic | [fstar-proofs §93](fstar-proofs/SKILL.md) |
+| An **`exists` goal** that will not close with every fact in context — F\* introduces it itself **iff the witness is already NAMED**; `exists_intro` is needed only for a *computed* witness (fixed-width leaves need none) | [fstar-proofs §94](fstar-proofs/SKILL.md) |
+| About to blame the **solver / toolchain / a numeric literal** — first look for a **counterexample to your own obligation** | [fstar-proofs §95](fstar-proofs/SKILL.md) |
+| A **backward law** will not prove for a decoder — check whether `dec` accepts **non-image input** (overlong / alternate encodings); if so it is a design decision, not a proof | [fstar-proofs §96](fstar-proofs/SKILL.md) |
+| Run that canonicality check as a **sweep over every leaf** — the cheap two-shape test, and why a per-field disposition table structurally cannot see the defect | [fstar-proofs §96](fstar-proofs/SKILL.md) |
+| `open FStar.Mul` fails under F\* ≥ v2026.09.20 (`Error 134`) — use `FStar.Math.Lemmas`; the LSP tool tolerates the old name | [fstar-proofs §98](fstar-proofs/SKILL.md) |
+| Tempted to **weaken the law** so a permissive decoder fits? It is a dead end — the True/canonical dichotomy, and why `product`'s STEP kills it | [fstar-proofs §99](fstar-proofs/SKILL.md) |
+| Proof over a **big-int encoder** is slow (100 s+) — stub lemmas, unsplit identity+range, or unrolled recursion | [fstar-proofs §97](fstar-proofs/SKILL.md) |
+| **Route 1 of §93 worked end-to-end**: a decoder whose return type is indexed by its input, proven both ways — count decoder + refined accessor + one conversion | [fstar-proofs §93](fstar-proofs/SKILL.md) |
 | **Split a module** safely: `make check` does not track deps; `include` ≠ `open`; unclosed `(** *` swallows a file; tier closure | [fstar-2026.09.20 §10](fstar-2026.09.20/SKILL.md) |
+| A **grep-based gate** (0 admits / rlimit) reports `clean` — check its file glob matches what you verify, and that its comment stripper is **nesting-aware** | [fstar-build §10](fstar-build/SKILL.md) |
 | Audit cross-module buffer layouts (F* ↔ C) | [fstar-proofs §33](fstar-proofs/SKILL.md) |
 | Audit admit()-bodied functions for buffer overflows | [fstar-proofs §34](fstar-proofs/SKILL.md) |
 | Audit admit counts across docs/source (drift) | [fstar-proofs §40](fstar-proofs/SKILL.md) |
