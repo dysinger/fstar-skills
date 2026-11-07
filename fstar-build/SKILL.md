@@ -528,3 +528,63 @@ printf 'module T\n(* nested (* admit *) *)\nlet f () : Tot int = 1\n' > /tmp/p2.
 
 If the first exits 0 the regex is wrong; if the second exits 1 the stripper is
 wrong.  Both directions, every time the checker is edited.
+
+## 11. Counts in a proof library: three ways a lemma total is wrong
+
+Verified 2026-11-07 while auditing a library whose README said "67 lemmas,
+mechanically anchored".  All three errors were present **at once**, and each
+alone was enough to make the number unusable.
+
+### Error 1 — counting `let` misses the Pulse `fn` lemmas
+
+In a module that mixes pure and Pulse code, the proved roundtrip lemmas are
+often written as Pulse functions:
+
+```fstar
+fn lemma_pulse_roundtrip_uint8 (b: A.array U8.t) (i n: U32.t) ...   (* counted by NO grep of ^let *)
+```
+
+`grep -c '^let lemma_'` finds **67**; the module also had **9** `fn lemma_*`.
+The honest total was **76**.  Worse, the 9 omitted ones were exactly the
+C-path roundtrip theorems — the ones whose *absence* would matter most.
+
+**Rule.** Count `^let lemma_` **and** `^fn lemma_`.  State the split in the
+document, because the next reader will run the `let` grep, get a smaller
+number, and conclude the README is wrong.
+
+### Error 2 — "mechanically anchored" is a claim, not a vibe
+
+The library had a `Data.Codec.Test.Integration` module described as binding
+every lemma so deletion breaks the build.  It bound **58 of 67**.  The other
+nine could be deleted with a green build — and five of those nine were
+referenced *nowhere*, i.e. dead code the coverage claim was hiding.
+
+**Rule.** To check an anchoring claim, extract every `^let lemma_<name>` from
+`src/` and require the name to appear in the integration module:
+
+```python
+lems = set(re.findall(r'(?m)^let lemma_([a-z_0-9]+)', stripped_src))
+missing = sorted(l for l in lems if l not in stripped_integration)
+```
+
+Any `missing` entry falsifies "every lemma is anchored".  Then decide per
+lemma: **anchor it** (if `src/` uses it) or **delete it** (if nothing does).
+Do not anchor dead code — an anchor for an unused lemma makes deletion harder,
+which is backwards.
+
+### Error 3 — a count without its command drifts, and the drift is invisible
+
+The same README had earlier said 93 lemmas (truth 67) and "93 `Seq` lemmas"
+when `FStar.Seq.Base` + `FStar.Seq.Properties` export **145** `val`s.  Both
+numbers were plausible; neither was reproducible.
+
+**Rule.** A published count carries the command that produces it, or a rule
+precise enough to be machine-checked.  "76 lemmas (67 `^let lemma_` + 9
+`^fn lemma_`)" survives a re-audit; "93 lemmas" does not.
+
+### The audit lesson under all three
+
+A count is a **claim about the code**, not a fact about the document.  Every
+one of these was a number that had been copied forward through edits without
+being re-derived.  Re-derive from source before publishing, and show the
+arithmetic.

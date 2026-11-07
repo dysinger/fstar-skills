@@ -7265,3 +7265,54 @@ lemma, never only the steps.  (2) Prefer an invariant over the *decoder state*
 (accumulator + position), not over the raw input — the state is what the
 branches actually test.
 
+
+## 100. A documentation claim of "structural" is a claim about the SHIPPED type, not the planned one
+
+Verified 2026-11-07 in an audit of a codec library.  A README entry said the
+consumed-byte bound "becomes structural" via a refined remainder, and framed the
+old record field as "dead weight that proved nothing".  Both halves were wrong
+about `src/`:
+
+- the field was **still there** (`dec_consumed_bound` in the record), and 22 of
+  26 literals filled it with `(fun s -> ())`;
+- the refined `remainder` type existed but was used **only** by a second,
+  migration-only record that **no combinator instantiated**.
+
+So a property of the *target* type was documented as a property of the *shipped*
+one.  This has a specific, cheap check.
+
+### The check
+
+For any doc claim of the form "X is now structural / enforced / type-level":
+
+1. `grep` the field the claim says is gone.  If it is still in the record, the
+   claim is about a different type.
+2. `grep` the new type's name in `src/` **minus its own declaration**.  If the
+   only hits are the declaration and comments, nothing uses it, so nothing it
+   provides has shipped.
+3. Only then read the proof.
+
+### Why this is a `fstar-proofs` entry and not a docs entry
+
+Because the failure mode is tempting *precisely when the proof work is real*.
+In this case every spike was proved, the laws were genuine, and the migration
+was 60% done — which is exactly when "it's structural now" feels true.  The
+proofs are not the problem; the **tense** is.  A reviewer who reads the spike
+suite and then the README will confirm the README, because the README describes
+the code they just read.
+
+**Rule.** A Strengthening holds of `src/` or it is a target.  Mark it.  If a
+second type exists for migration, the marker is mandatory, because "no
+combinator uses it yet" is invisible from the proof.
+
+### Corollary — a `()` lemma body is not evidence of a vacuous obligation
+
+The same audit flagged `(fun s -> ())` bodies on 22 bound proofs as suspicious.
+They were **legitimate**: `dec` returns a consumed count that SMT proves
+`≤ |s|` from the decoder's own structure (a slice, a literal, a `create`).  To
+tell "discharged by SMT" from "vacuous", compile a **deliberately false**
+variant of the same obligation — e.g. `n < |s|` where the decoder consumes the
+whole buffer — and confirm it **fails**.  It did, so the `()` bodies were
+load-bearing.
+
+Do not "fix" a `()` body because it looks empty.  Test it.
