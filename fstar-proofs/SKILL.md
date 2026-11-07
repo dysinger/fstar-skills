@@ -6961,12 +6961,28 @@ goal's context.**  If the proof has *named* it (`s0`, or a local), SMT
 instantiates; if the encoding is only reachable through lemmas about a
 *computed* value, it cannot.
 
-This is what distinguishes two real cases, both `law_bwd`:
+This is what distinguishes three measured cases, all `law_bwd`:
 
 | leaf | witness | `exists_intro`? |
 |---|---|---|
 | fixed width (`word16*`/`word32*`) | `create s[0] ++ create s[1]` — mentioned by the conjuncts | **not needed** (four such laws verify without it) |
+| `text` (2026-11-07) | `expected` — and `enc () = Some expected` **names** it outright | **not needed** |
 | `bytes` | `Seq.slice s 0 n` for a **computed** `n` | **needed** |
+
+The `text` row is the useful control, because it is **variable-width yet needs
+no witness** — which kills the tempting generalisation "variable length ⇒
+`exists_intro`" (that was the stated carry-forward for the next leaf, and it
+was wrong).  What decides the question is *not* the width and *not* the shape;
+it is whether a conjunct already names the encoding.  `text`'s `enc` is
+`fun () -> string_to_bytes s`, so the hypothesis `enc () = Some e` immediately
+gives `e := string_to_bytes s`.
+
+The same leaf also shows the **two-step is not a variable-width requirement**:
+it exists to protect an induction from the remainder-indexed return type
+(§93), so a decoder that does not recurse (`text` is one slice comparison)
+needs neither the count decoder nor the refined accessor.  Applying the
+two-step wherever the length is variable is cargo cult.  Check the decoder for
+recursion — that, not the width, is the trigger.
 
 So the operational rule is: **state the conjuncts as separate `assert`s that
 name the witness first; only if the witness is computed (and so unnamed) reach
