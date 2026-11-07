@@ -7316,3 +7316,89 @@ whole buffer — and confirm it **fails**.  It did, so the `()` bodies were
 load-bearing.
 
 Do not "fix" a `()` body because it looks empty.  Test it.
+
+## 101. `grep '^let lemma_'` is not a lemma count, and not a coverage sweep — F* has THREE declaration forms
+
+**Verified 2026-11-07** (same codec-library audit as §100).  A count and a
+coverage sweep were both built on `grep '^let lemma_'`.  Both were wrong, and
+**both were wrong in the direction that looks like success.**
+
+The library had 102 lemmas in three forms:
+
+| form | count | missed by `^let lemma_`? |
+|---|---|---|
+| `let lemma_*` | 62 | no |
+| `let rec lemma_*` | **31** | **YES** |
+| `fn lemma_*` (Pulse) | 9 | **YES** |
+
+So `^let lemma_` reported **62**, and `^let lemma_` + `^fn lemma_` reported
+**71** — each a perfectly plausible number, each wrong, and each written into
+the README as fact in a separate pass.  The prose was corrected 76 → 71 → 102
+across three commits, every step "verified".
+
+### The one command that is right
+
+```bash
+grep -rhoE '^(let|let rec|fn) lemma_[A-Za-z0-9_]+' src/*.fst \
+  | sed -E 's/^(let rec|let|fn) //' | sort -u | wc -l
+```
+
+`sort -u` is not decoration: mutual-rec lemmas and a `val`+`let` pair can repeat
+a name, so a raw line count over-reports, which is the *other* silent error.
+
+### The same blind spot in a coverage sweep is worse
+
+The sweep `for l in $(grep '^let lemma_' src/*.fst …)` reported **"all lemmas
+anchored"** while the 31 `let rec` lemmas had never been examined.  Re-running
+with the three-form pattern immediately found **4 unanchored** lemmas
+(`lemma_is_prefix_of_self_append`, `lemma_is_prefix_of_app_ignores_tail`,
+`lemma_scan_until_split_general`, `lemma_sep_by1_enc_nonempty`) — all
+`let rec`, all used 3–5× by `src/`, none referenced by the anchor module.
+
+**Rule: a coverage sweep must enumerate with the same pattern a reader would use
+to find a lemma, i.e. all three forms.** If a sweep reports "nothing missing",
+re-run it with a pattern that matches a superset of what it should find, and
+check it finds *more* than it did.  A sweep that reports everything missing is
+broken (the `\b` trap below); a sweep that reports nothing missing may be
+broken the same way.
+
+> **BSD/macOS `grep` has no `\b`.**  `grep -c "\b$name\b"` returns **0** for
+> every name, so a sweep written that way reports *everything* missing — a
+> broken sweep that reads as a catastrophic finding.  Use
+> `-E "(^|[^A-Za-z0-9_])$name([^A-Za-z0-9_]|$)"`.  Both halves of this trap were
+> hit in one audit: first the over-report (all missing), then the under-report
+> (`^let` only).
+
+### "Used in `src/`" ≠ "anchored" — and the difference is the whole point
+
+Deletion-testing the anchors split them cleanly in two:
+
+| lemma | deleted ⇒ | what caught it |
+|---|---|---|
+| `lemma_scan_prefix`, `lemma_scan_cons_no_prefix`, `lemma_no_overlap_cons` | `Types` fails (`Error 72`) | an **existing consumer** |
+| `lemma_split_head` | `Types` **verifies green**; only `Test.Integration` fails | the **anchor and nothing else** |
+
+`lemma_split_head` is the important case: no `src/` proof calls it yet (its
+consumers are laws that do not exist), so an anchor is the *only* mechanism that
+notices its removal.  A lemma can be load-bearing for future work and have zero
+present consumers — which is exactly the case a "it's used, so it's safe"
+argument gets wrong.
+
+**Do:** deletion-test each anchor and record *which module failed*.  "It breaks
+the build" is not the finding; "it breaks `Types`" vs "it breaks only the anchor
+module" is.
+
+### Do not anchor dead code
+
+Five accessor lemmas (`opt_prefixed_*_eq`) had exactly **one** reference in the
+whole tree — their own definition — and none in `test/`.  Anchoring them would
+make deleting dead code fail the build, which is backwards.  **Delete them**, and
+leave a comment at the deletion site so the next reader does not re-add them
+speculatively.  For each candidate, the decision procedure is:
+
+1. references in `src/` excluding its own definition = 0, and in `test/` = 0
+   ⇒ **dead, delete**;
+2. otherwise ⇒ **anchor, then deletion-test**.
+
+Never a third option ("anchor it to be safe"), because that converts dead code
+into permanent maintenance with a build-failure price attached to its removal.

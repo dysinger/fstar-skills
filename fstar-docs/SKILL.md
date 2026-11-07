@@ -196,9 +196,24 @@ enforce it.
 
 ### Audit procedure
 
+⚠️ **`grep -c '^let lemma_'` is NOT the lemma count.**  F\* has three
+lemma-declaration forms and this pattern matches one of them:
+
+| form | matched by `^let lemma_`? |
+|---|---|
+| `let lemma_*` | yes |
+| `let rec lemma_*` | **no** |
+| `fn lemma_*` (Pulse) | **no** |
+
+A real audit (2026-11-07) reported 62 with this pattern, then 71 after adding
+`^fn`, when the true total was **102** — 31 `let rec` lemmas were invisible.
+Three successive "verified" numbers in prose.  Full recipe and the coverage-sweep
+consequence: `fstar-proofs` §101.
+
 ```bash
-# Count actual lemmas in a file
-grep -c '^let lemma_' file.fst
+# Count actual lemmas (all three forms; sort -u dedups mutual-rec / val+let pairs)
+grep -rhoE '^(let|let rec|fn) lemma_[A-Za-z0-9_]+' src/*.fst \
+  | sed -E 's/^(let rec|let|fn) //' | sort -u | wc -l
 
 # Verify header count matches
 grep 'Coverage audit\|compliance lemmas' file.fst
@@ -215,9 +230,19 @@ grep 'Coverage audit\|compliance lemmas' file.fst
 ### Prevention
 
 After ANY session that adds or removes lemmas:
-1. `grep -c '^let lemma_' file.fst`
+1. Re-run the three-form count above (not `grep -c '^let lemma_'`)
 2. Update the doc comment header count
-3. Update any derived status-table count in the same commit
+3. Update **every** derived count in the same commit — grep the whole repo for
+   the old number.  A count typically appears in three places (the `@header`
+   comment, a README table row, and a prose summary); fixing one and not the
+   others is how "76" survives a correction to "71".
+
+### A count must be published with its command
+
+State the rule next to the number ("62 `let` + 31 `let rec` + 9 `fn`"), never a
+bare total.  A bare total invites `grep -c '^let lemma_'`, which returns a
+*smaller plausible number*, and the next reader concludes the doc is wrong and
+"fixes" it to the wrong value.  That loop ran three times in one change.
 
 ## 10. Never carry bare line numbers in plans, notes, or task lists
 

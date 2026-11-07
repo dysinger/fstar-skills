@@ -529,28 +529,42 @@ printf 'module T\n(* nested (* admit *) *)\nlet f () : Tot int = 1\n' > /tmp/p2.
 If the first exits 0 the regex is wrong; if the second exits 1 the stripper is
 wrong.  Both directions, every time the checker is edited.
 
-## 11. Counts in a proof library: three ways a lemma total is wrong
+## 11. Counts in a proof library: four ways a lemma total is wrong
 
 Verified 2026-11-07 while auditing a library whose README said "67 lemmas,
-mechanically anchored".  All three errors were present **at once**, and each
-alone was enough to make the number unusable.
+mechanically anchored".  All of these errors were present **at once**, and each
+alone was enough to make the number unusable.  The same audit then repeated
+error 1 **twice more** while "fixing" it — 67 → 76 → 71, all wrong; the true
+total was **102**.  That progression is the lesson.
 
-### Error 1 — counting `let` misses the Pulse `fn` lemmas
+### Error 1 — counting `^let lemma_` misses BOTH `let rec` and Pulse's `fn`
 
-In a module that mixes pure and Pulse code, the proved roundtrip lemmas are
-often written as Pulse functions:
+F\* has three lemma-declaration forms, and the intuitive grep matches one:
 
-```fstar
-fn lemma_pulse_roundtrip_uint8 (b: A.array U8.t) (i n: U32.t) ...   (* counted by NO grep of ^let *)
+| form | counted by `^let lemma_`? |
+|---|---|
+| `let lemma_*` | yes |
+| `let rec lemma_*` | **no** |
+| `fn lemma_*` (Pulse) | **no** |
+
+In the audited library: 62 `let` + **31 `let rec`** + **9 `fn`** = **102**.  The
+`^let` grep said 62; adding `^fn` said 71; both were published as fact.
+The 9 omitted `fn` lemmas were exactly the C-path roundtrip theorems — the ones
+whose *absence* would matter most — and the 31 recursive lemmas were the
+induction results behind the hardest proofs.
+
+**Rule.** Count all three forms, dedup names:
+
+```bash
+grep -rhoE '^(let|let rec|fn) lemma_[A-Za-z0-9_]+' src/*.fst \
+  | sed -E 's/^(let rec|let|fn) //' | sort -u | wc -l
 ```
 
-`grep -c '^let lemma_'` finds **67**; the module also had **9** `fn lemma_*`.
-The honest total was **76**.  Worse, the 9 omitted ones were exactly the
-C-path roundtrip theorems — the ones whose *absence* would matter most.
-
-**Rule.** Count `^let lemma_` **and** `^fn lemma_`.  State the split in the
-document, because the next reader will run the `let` grep, get a smaller
-number, and conclude the README is wrong.
+`sort -u` matters: a `val` + `let` pair or a mutual-rec group repeats a name, so
+a raw line count over-reports — the *other* silent error.  State the per-form
+split in the document, because the next reader will run the `let` grep, get a
+smaller number, and "fix" the doc to the wrong value.  Full story:
+`fstar-proofs` §101.
 
 ### Error 2 — "mechanically anchored" is a claim, not a vibe
 
@@ -559,18 +573,32 @@ every lemma so deletion breaks the build.  It bound **58 of 67**.  The other
 nine could be deleted with a green build — and five of those nine were
 referenced *nowhere*, i.e. dead code the coverage claim was hiding.
 
-**Rule.** To check an anchoring claim, extract every `^let lemma_<name>` from
-`src/` and require the name to appear in the integration module:
+**Rule.** To check an anchoring claim, extract every lemma name — **all three
+forms, same blind spot as error 1** — and require it to appear in the
+integration module:
 
-```python
-lems = set(re.findall(r'(?m)^let lemma_([a-z_0-9]+)', stripped_src))
-missing = sorted(l for l in lems if l not in stripped_integration)
+```bash
+grep -rhoE '^(let|let rec|fn) lemma_[A-Za-z0-9_]+' src/*.fst \
+  | sed -E 's/^(let rec|let|fn) //' | sort -u \
+  | while read l; do
+      grep -qE "(^|[^A-Za-z0-9_])$l([^A-Za-z0-9_]|$)" test/*Integration.fst \
+        || echo "MISSING $l"
+    done
 ```
 
-Any `missing` entry falsifies "every lemma is anchored".  Then decide per
-lemma: **anchor it** (if `src/` uses it) or **delete it** (if nothing does).
-Do not anchor dead code — an anchor for an unused lemma makes deletion harder,
-which is backwards.
+Any `missing` entry falsifies "every lemma is anchored".  A sweep built on
+`^let` alone reported **full coverage** while 4 `let rec` lemmas were in fact
+unanchored — so re-run with the three-form pattern before believing a
+"nothing missing" result.
+
+Then decide per lemma: **anchor it** (if `src/` uses it) or **delete it** (if
+nothing does).  Do not anchor dead code — an anchor for an unused lemma makes
+deletion harder, which is backwards.
+
+> BSD/macOS `grep` has **no `\b`**.  `grep -c "\b$name\b"` silently returns 0
+> for every name, so a sweep written that way reports *everything* missing — a
+> broken sweep that looks like a disastrous finding.  Use
+> `-E "(^|[^A-Za-z0-9_])$name([^A-Za-z0-9_]|$)"`.
 
 ### Error 3 — a count without its command drifts, and the drift is invisible
 
@@ -579,8 +607,14 @@ when `FStar.Seq.Base` + `FStar.Seq.Properties` export **145** `val`s.  Both
 numbers were plausible; neither was reproducible.
 
 **Rule.** A published count carries the command that produces it, or a rule
-precise enough to be machine-checked.  "76 lemmas (67 `^let lemma_` + 9
-`^fn lemma_`)" survives a re-audit; "93 lemmas" does not.
+precise enough to be machine-checked.  "102 lemmas (62 `let` + 31 `let rec` + 9
+`fn`)" survives a re-audit; "93 lemmas" does not — and neither did "67", "76"
+or "71", each of which was written down as verified.
+
+**Corollary: grep the whole repo for the old number when you change it.**  A
+count typically lives in three places (a doc comment, a README table row, a
+prose summary).  Fixing one and not the others is how a stale total outlives
+its correction.
 
 ### The audit lesson under all three
 

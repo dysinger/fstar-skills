@@ -55,7 +55,8 @@ with C/OCaml/WASM extraction.  This skill is split into focused sub-skills.
 | **Route 1 of §93 worked end-to-end**: a decoder whose return type is indexed by its input, proven both ways — count decoder + refined accessor + one conversion | [fstar-proofs §93](fstar-proofs/SKILL.md) |
 | **Split a module** safely: `make check` does not track deps; `include` ≠ `open`; unclosed `(** *` swallows a file; tier closure | [fstar-2026.09.20 §10](fstar-2026.09.20/SKILL.md) |
 | A **grep-based gate** (0 admits / rlimit) reports `clean` — check its file glob matches what you verify, and that its comment stripper is **nesting-aware** | [fstar-build §10](fstar-build/SKILL.md) |
-| A published **lemma count** is wrong — `^let lemma_` misses Pulse `fn lemma_*`; "every lemma is anchored" is a claim to check, not assume; a count without its command drifts | [fstar-build §11](fstar-build/SKILL.md) |
+| A published **lemma count** is wrong — `^let lemma_` misses **both** `let rec lemma_*` (31 in one library) **and** Pulse `fn lemma_*` (9); "every lemma is anchored" is a claim to check, not assume; a count without its command drifts | [fstar-build §11](fstar-build/SKILL.md) |
+| A **coverage sweep** reports "nothing missing" — re-run it with `^(let|let rec|fn) lemma_`; also: "used in `src/`" ≠ "anchored" (a lemma with no present consumer is caught *only* by its anchor), and never anchor dead code | [fstar-proofs §101](fstar-proofs/SKILL.md) |
 | A doc claims something is **"structural" / "enforced" / "type-level"** — check the field it says is gone is gone, and that the new type is actually instantiated in `src/`; a `()` lemma body is not evidence of vacuity | [fstar-proofs §100](fstar-proofs/SKILL.md) |
 | Audit cross-module buffer layouts (F* ↔ C) | [fstar-proofs §33](fstar-proofs/SKILL.md) |
 | Audit admit()-bodied functions for buffer overflows | [fstar-proofs §34](fstar-proofs/SKILL.md) |
