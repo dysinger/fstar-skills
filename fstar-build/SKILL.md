@@ -517,6 +517,32 @@ def strip_comments(s):
 Keep line structure (emit `\n` for comments' newlines) so reported line
 numbers stay true.
 
+### Bug 3 — evidence that is IN the repo but not in the LIST
+
+A related, later failure (2026-11-07, one change later): a directory of
+evidence modules was rescued from `/tmp` into the repository — and still never
+added to the runner's `mods` list.  The file glob would have caught them; the
+explicit list did not.  So the fix for Bug 1 (derive from the list) does
+**not** protect against forgetting the list.
+
+**Rule:** after adding evidence files, assert the *count*, not just exit 0:
+
+```bash
+ls evidence/*.fst | wc -l                   # 10
+grep -c ':' <<< "$mods"                     # must match (+ refutations)
+```
+
+Forgetting to add a file is invisible to a green run — the run is green
+*precisely because* it was never checked.  A count assertion is the only check
+that notices an omission.
+
+And name the runner entry by the file's **declared module name**.  The runner
+copies each file to its declared name before verifying, so a convenient alias
+(`DIGITS_PEEL.fst:F42_DigitsPeel`) leaves the copy named `F42_DigitsPeel.fst`
+while the file says `module DIGITS_PEEL` — `Error 141, Interactive mode only
+supports a single module at the top-level`.  The error reads like a harness
+problem and is really a one-line mismatch; check the module header.
+
 ### Always prove the gate both ways
 
 A gate is only evidence if you have watched it **fire**.  Test it directly:

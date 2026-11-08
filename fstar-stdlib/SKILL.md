@@ -328,3 +328,48 @@ new val erased (a: Type u#a) : Type u#a
 val reveal: #a: Type u#a -> erased a -> GTot a     (* Only in Ghost *)
 val hide  : #a: Type u#a -> a -> Tot (erased a)
 ```
+
+---
+
+## 11. Seq lemmas: the prefix is NOT uniform — `slice_slice` and `slice_length` are unprefixed
+
+Verified 2026-11-07. **Grepping `^val lemma_slice` in
+`FStar.Seq.Properties.fsti` returns four lemmas and misses two that exist.**
+
+```fstar
+(* all of these are in FStar.Seq.Properties *)
+val lemma_slice_append : ...
+val lemma_slice_cons   : ...
+val lemma_slice_first_in_append : ...
+val lemma_slice_snoc   : ...
+
+(* NO `lemma_` prefix -- these carry SMTPat instead *)
+val slice_length (#a) (s: seq a)
+  : Lemma (slice s 0 (length s) == s)
+  [SMTPat (slice s 0 (length s))]
+
+val slice_slice (#a) (s: seq a)
+  (i1: nat) (j1: nat{i1 <= j1 /\ j1 <= length s})
+  (i2: nat) (j2: nat{i2 <= j2 /\ j2 <= j1 - i1})
+  : Lemma (slice (slice s i1 j1) i2 j2 == slice s (i1 + i2) (i1 + j2))
+  [SMTPat (slice (slice s i1 j1) i2 j2)]
+```
+
+**Why it matters:** I wrote a local `lemma_slice_slice`, claimed a library gap,
+and reported it as an upstream finding.  It was already there.  The tell is that
+`slice_slice` and `slice_length` use `[SMTPat]`, and this module's convention is
+that `SMTPat`-carrying lemmas are named as **bare nouns**, not `lemma_*`.
+
+**Do:** grep for the *concept* (`grep -n 'slice.*slice'`), or list all `val`s
+and filter, before concluding a lemma is absent.  A missing `lemma_*` name is
+not a missing lemma.
+
+### Other Seq facts that are not automatic
+
+- `append s empty == s` is **not** reducible on its own — unlike lists'
+  `l @ [] == l`.  Prove it with `Seq.lemma_eq_intro (append s empty) s`.
+- `append empty s == s` likewise (the left case).
+- `seq_of_list` is recursive, so SMT leaves `seq_of_list (h :: t)` **opaque**;
+  `Seq.lemma_eq_elim` it against `append (create 1 h) (seq_of_list t)` when you
+  need to see inside.  `FStar.Seq.Properties.lemma_seq_of_list_index` gives the
+  index law (`index (seq_of_list l) i == List.Tot.index l i`, with `SMTPat`).

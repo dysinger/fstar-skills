@@ -7418,3 +7418,96 @@ speculatively.  For each candidate, the decision procedure is:
 
 Never a third option ("anchor it to be safe"), because that converts dead code
 into permanent maintenance with a build-failure price attached to its removal.
+
+## 102. SMT PROVES an unfolded equation but will not DERIVE it from the call — state decoders one step at a time
+
+Verified 2026-11-07 making the canonical `digits_to_int` decoder carry
+`law_fwd` (continues §89/§93/§97). **The finding cost ~40 probes across four
+sessions, and three of my own published claims in that time were wrong because
+of it.** It is the sharpest statement of the §89 "definition" tell.
+
+### The one sentence
+
+> **SMT can prove a recursive decoder's UNFOLDED equation.  It will not DERIVE
+> the unfolded form from a call to the decoder.**
+
+Every failing goal was *depth-0*: it mentioned `dec s 10 0 0` and hoped SMT
+would reduce.  Every succeeding goal was *already reduced*: it was an equation
+between the call and the decoder's own one-step body.
+
+### Measured table (digits decoder, identical side conditions throughout)
+
+| statement | result |
+|---|---|
+| one concrete 2-digit decode (`Seq.create`, literals) | ✅ |
+| arbitrary byte, ONE digit, no suffix | ✅ |
+| arbitrary byte, ONE digit, **opaque suffix `r`**, at depth 0 | ❌ |
+| the SAME, stated as the reduced one-step body | ✅ |
+| generic unfold with index + length + guard facts ALL supplied | ❌ |
+| fully opaque tail `t`, concrete fuel `11` at depth 0 | ❌ |
+
+### The two lemmas that make it work
+
+```fstar
+(* 1. ONE step, in reduced form.  Arbitrary s, i, a, k -- no case split. *)
+let step_gen (s: byte_seq) (k: nat) (a: int) (i: nat) : Lemma
+  (requires k > 0 /\ i < Seq.length s)
+  (ensures dec (fun _ -> true) s k a i
+         == (let b = U8.v (Seq.index s i) in
+             if 0x30 <= b && b <= 0x39
+             then dec (fun _ -> true) s (k-1) (a*10 + (b - 0x30)) (i+1)
+             else if i = 0 then None else Some (a, i)))
+  = ()
+
+(* 2. The peel: recurse with `s` FIXED, carrying a SLICE hypothesis.
+      NEVER carry `s == seq_of_list ds ++ r` -- that asks for a substitution
+      between two different `seq_of_list` forms, and fails.  The slice does not. *)
+let rec lemma_peel (ds: list byte) (s: byte_seq) (a: int) (i: nat) (k: nat)
+  : Lemma (requires all_digits ds = true /\ k == length ds + 10
+                  /\ i + length ds <= Seq.length s
+                  /\ Seq.slice s i (i + length ds) == seq_of_list ds
+                  /\ rest_at s (i + length ds))   (* stop succeeds here *)
+          (ensures dec (fun _ -> true) s k a i == Some (acc_digits ds a, i + length ds))
+  = match ds with
+    | [] -> ...
+    | d :: tl -> step_gen s k a i; ...; lemma_peel tl s (...) (i+1) (k-1)
+```
+
+**`step_gen` beats a 5-way concrete split** (the library's own
+`lemma_varint_enc_dec_{1..5}byte` pattern): one lemma, any width.
+
+### Two hypothesis shapes that KILL a recursion (same family as §93)
+
+1. **A fact about the START position** cannot be threaded: `from = p` becomes
+   `from = p + 1` after one step.  Carry a fact about the *input*
+   (`forall i > from. ...`) instead.
+2. **An INITIAL condition** cannot be threaded: `i = 0` fails as soon as the
+   recursion increments `i`.  State an *invariant* (`i < nbytes`).
+
+### Side conditions: the base case carries the spec bug
+
+A peel's **base case** is where a wrong side condition surfaces, not the
+induction — the induction just inherits it silently.  Measured twice in one
+change: `Seq.append s Seq.empty == s` is **not** automatic in this F\* (needs
+`Seq.lemma_eq_intro`), and the decoder's `else if i = 0 then None` branch means
+"the remainder does not start with a digit" is **too weak** — a non-empty
+remainder is admissible only once something has been consumed.
+
+**Check the base case against the decoder's own branch structure before
+believing any side condition.**
+
+### Process rules this earned
+
+- **Reproduce a probe in a CLEAN module before recording it.**  One "passing"
+  probe closed only because the file's *earlier failing lemmas* had seeded the
+  SMT context; alone, it failed.  Two published claims fell to this.
+- **Take a recommendation as a direction, never as a statement.**  The winning
+  form was the recommendation *modified by a probe*.
+- **A missing `lemma_*` name is not a missing lemma.**  `FStar.Seq.Properties`
+  has `slice_slice` and `slice_length` **unprefixed** (they carry `SMTPat`);
+  grepping `^val lemma_slice` returns a false negative.  Grep for the *concept*.
+
+| what | where |
+|---|---|
+| `step_gen` + slice peel, proved | `codec-strict-isomorphism/probe-f42/DIGITS_PEEL.fst` |
+| the 40-probe record | same change, `research.md` F47–F52 |
