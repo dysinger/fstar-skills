@@ -555,6 +555,41 @@ printf 'module T\n(* nested (* admit *) *)\nlet f () : Tot int = 1\n' > /tmp/p2.
 If the first exits 0 the regex is wrong; if the second exits 1 the stripper is
 wrong.  Both directions, every time the checker is edited.
 
+## 10b. `make check` says "Nothing to be done" and you believe it
+
+Verified 2026-11-09.  A `make`-driven verify target is **stamp-based**, so an
+edit that does not touch a rule's prerequisites — or any edit at all, once the
+stamp exists — reports
+
+```
+make: Nothing to be done for 'check'.
+```
+
+and exits **0**.  Read as a green baseline, that is the previous session's
+result.  It bites hardest exactly when you need the baseline most: *before*
+editing a core module, to know what you are breaking.
+
+**Rule: force a real baseline by pointing the output dir somewhere fresh.**
+
+```bash
+make check OUT=/tmp/<unique-dir>       # first run: everything re-verifies
+rm -rf /tmp/<unique-dir>               # if you want to re-run the same dir
+```
+
+Two traps around this:
+
+- **The first `OUT=` run can pass while the second reports fully cached**, so
+  read the `=== <Module> ===` lines of a *clean* run to know the real set, not
+  the exit code of a cached one.  Grep for them:
+  `make check OUT=/tmp/x | grep -E '^=== |Verified module|Error'`.
+- **`make check` does not track dependencies.**  A changed `Types.fst` does not
+  force `Pulse` or the test modules to re-verify, so "7 modules green" after a
+  core edit can mean "one module green, six stamps reused".  A fresh `OUT=`
+  removes the doubt.
+
+This is the verify-side twin of §10's grep-side bug: both are gates that
+*report clean without having looked*.
+
 ## 11. Counts in a proof library: four ways a lemma total is wrong
 
 Verified 2026-11-07 while auditing a library whose README said "67 lemmas,
@@ -648,3 +683,68 @@ A count is a **claim about the code**, not a fact about the document.  Every
 one of these was a number that had been copied forward through edits without
 being re-derived.  Re-derive from source before publishing, and show the
 arithmetic.
+
+---
+
+## 12. A cross-repo parity gate must compare the SHARED parts, not demand equality
+
+Verified 2026-11-08.  The failure mode is the mirror of §10: there the gate
+checked the wrong *files*; here it checks the right files with a relation that
+is too strong, so an **unrelated change in the sibling repo turns this repo's
+build red**.
+
+### The case
+
+`fstar-codec/check-readme-parity.sh` asserts that this repo's README and
+`../lean-codec/README.md` have the **same list** of `##` headings — it diffs
+the two lists and fails on any difference.  That held for months.  Then
+`lean-codec` added a ninth section (`## The gate that keeps the gates honest`,
+describing `Axioms.lean`/`lake build`) and this repo went red:
+
+```
+FAIL: the eight ## headings do not match ../lean-codec/README.md in name/order
+  -## The gate that keeps the gates honest
+```
+
+**Nothing here was wrong.**  The local README still had exactly the eight
+expected sections.  The check was asking "are these two documents identical in
+structure?", which is not the property it documents ("the eight **shared**
+sections agree in name and order").
+
+### Why it matters more than a broken build
+
+- **It misattributes blame.**  A red gate in the middle of unrelated work reads
+  as "I broke something", and the cheap fix is to *edit the local README to
+  appease the check* — which is the gate dictating content.
+- **It cannot be satisfied.**  The Lean section describes an artifact with no
+  F* analogue, so equality is unachievable, not merely inconvenient.
+- **Stash-test before believing a red gate is yours.**  `git stash -u`, re-run,
+  `git stash pop`.  Ten seconds, and it distinguishes "my regression" from
+  "the sibling moved" — the same discipline as §95's "look for a
+  counterexample to your own obligation" applied to build state.
+
+### The rule
+
+State the relation the check *claims* and implement exactly that:
+
+```bash
+# WRONG  — any sibling addition breaks us
+diff <(headings ours) <(headings theirs)
+
+# RIGHT  — we own these names and this order; additions elsewhere are theirs
+for h in "${expected[@]}"; do check ours contains h, in order; done
+```
+
+and have the check **print what it skipped**, so a genuinely missing shared
+section is still caught.  A parity check that cannot say "extra section in the
+sibling, ignored" forces reviewers to guess.
+
+**Not fixed at the time** (it needs its own change plus a mutation test, per
+§10's rule 3 that a new check must be mutation-tested).  Recorded in
+`codec-strict-isomorphism/research.md` F57 so the next session does not read
+it as a regression.
+
+| what | where |
+|---|---|
+| the check | `fstar-codec/check-readme-parity.sh` |
+| the record | `codec-strict-isomorphism/research.md` F57 |

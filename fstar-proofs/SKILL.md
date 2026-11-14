@@ -7333,6 +7333,43 @@ load-bearing.
 
 Do not "fix" a `()` body because it looks empty.  Test it.
 
+### The complement, verified 2026-11-08: a `()` body can hide an UNREACHABLE `requires`
+
+The corollary above stops you deleting a legitimate empty body.  This is the
+other horn, and it is the more dangerous one because the lemma looks *proved
+and used*: a lemma whose empty body discharges its **statement** while its
+`requires` can never be satisfied by any caller.
+
+```fstar
+(* VERIFIES.  Useless: `pow2` does not reduce for a symbolic `m`, so the
+   hypothesis `v >= pow2 (7 * (m - 1))` is never derivable from the literal
+   threshold the caller actually has. *)
+let lemma_nbytes_ge (v: nat) (m: nat) : Lemma
+  (requires m >= 1 /\ m <= 5 /\ v >= pow2 (7 * (m - 1)))
+  (ensures nbytes_of_varint v >= m) = ()
+```
+
+The failure is **not** in the solver and not in the body — an empty body has
+only the statement to discharge, and SMT does that.  The defect is that
+`pow2 (7 * (m - 1))` is an expression SMT cannot unify with `2097152`, so the
+lemma can never fire.  The tell is a **call site**:
+
+```fstar
+let test_call (v: nat) : Lemma (requires v >= 2097152) (ensures nbytes_of_varint v >= 4)
+  = lemma_nbytes_ge v 4
+(* Failed to prove: v >= pow2 21 *)
+```
+
+**Rule.** For every `() : Lemma` whose `requires` mentions a *computed*
+expression (a `pow2`, a `%`, an arithmetic function) rather than a literal or a
+variable, write one call site in the same file.  A lemma with no call site has
+discharged its statement and nothing else.  Alternatively state thresholds
+against literals and do the reduction inside the proof.
+
+| what | where |
+|---|---|
+| both horns, measured | `codec-strict-isomorphism` `probe-f42/VARINT_CANON.fst`, `research.md` F59 |
+
 ## 101. `grep '^let lemma_'` is not a lemma count, and not a coverage sweep — F* has THREE declaration forms
 
 **Verified 2026-11-07** (same codec-library audit as §100).  A count and a
@@ -7511,3 +7548,972 @@ believing any side condition.**
 |---|---|
 | `step_gen` + slice peel, proved | `codec-strict-isomorphism/probe-f42/DIGITS_PEEL.fst` |
 | the 40-probe record | same change, `research.md` F47–F52 |
+
+## 103. `forall_intro` does NOT discharge a `requires` clause — let SMT prove the `forall` instead
+
+**Verified 2026-11-08** (proving that an encoder's output satisfies a
+"terminating byte past the start has a non-zero group" predicate, so that a
+canonical decoder could reuse a library roundtrip proved for the *unmodified*
+decoder; continues §102).
+
+### The signal, isolated in three lines
+
+```fstar
+let lemma_per (xs: list byte) (j: nat) : Lemma
+  (requires length xs >= 1) (ensures good_at (Seq.seq_of_list xs) 0 j) = ()
+
+let test (xs: list byte) : Lemma
+  (requires length xs >= 1) (ensures good (Seq.seq_of_list xs) 0)
+  = C.forall_intro #nat #(good_at (Seq.seq_of_list xs) 0)
+      (fun (j: nat) -> lemma_per xs j)
+(* Error 19 — the hypothesis is never delivered to the lambda *)
+```
+
+`FStar.Classical.forall_intro (#a) (#p) ($_: x:a -> Lemma (p x)) : Lemma
+(forall x. p x)` has nowhere to put a hypothesis: the lambda is
+`x:a -> Lemma (p x)`, and any `requires` on `lemma_per` must be discharged
+**inside** it from the enclosing context. In F\* v2026.09.20 that does not
+happen — the failure is a plain `Error 19`, not an unresolved implicit, so it
+reads like a proof failure.
+
+Measured, all in one session:
+
+| hypothesis shape | `forall_intro` delivers it? |
+|---|---|
+| `prop` (a `q`-style predicate), as a `requires` | ❌ |
+| `n:nat` with `n >= 1` as a `requires` | ❌ |
+| the same, passed as an **ordinary argument** to a `requires`-free lemma | ❌ (a `prop`-typed argument is refused: `Expected type P got type Prims.unit`) |
+| the same, but **SMT proves the `forall` directly** | ✅ |
+
+### The resolution is not a workaround
+
+Do not restructure the lemma into `move_requires`/`impl_to_arrow` chains.
+**Delete the `forall_intro`.** If the per-index facts are lemmas with
+conclusions of the right shape, SMT proves the `forall` goal on its own:
+
+```fstar
+let lemma_good (nb: nat) (i: nat) (v: nat) : Lemma
+  (requires ends_inside nb i v /\ v > 0)
+  (ensures good (Seq.seq_of_list (enc_fwd nb i v)) 0)
+  = lemma_enc_fwd_q nb i v;      (* q: all but the last are continuations *)
+    lemma_nonempty nb i v;
+    lemma_last_is_terminal nb i v;   (* the last byte is the terminal value *)
+    lemma_terminal_pos nb i v;       (* ... which is non-zero *)
+    lemma_len (enc_fwd nb i v)       (* list length == seq length *)
+```
+
+Five calls, no quantifier tactic. `forall_intro` is for goals whose *lemma
+handles* have trivially-true `requires`; reach for it only after SMT has
+failed on the bare `forall`.
+
+### Two companions, both measured in the same proof
+
+- **A `let`-bound `prop` will not unfold** for this purpose either (§91's third
+  trap, now seen at a `prop` *hypothesis*): `let facts l t : prop = q l /\
+  length l >= 1 /\ ...` refuses to transfer as a `()` argument, while the same
+  conjunction written out at both sites verifies. If a `prop`-valued helper has
+  to cross into an argument position, inline it.
+- **`U8.uint_to_t` (and its siblings) are `irreducible`.** SMT will not
+  round-trip `U8.v (U8.uint_to_t k) == k`; call `U8.vu_inv k` (with
+  `k < 256` in context). A goal that looks like arithmetic on an emitted byte
+  can be an opacity barrier.
+
+### Process note: this cost a long run of unexplained failures
+
+Every probe failed with the same `Error 19` and nothing distinguished them,
+because the probes were accumulating in one file. Two of this change's own
+rules ended it: **reproduce in a clean minimal module** (the 3-line repro
+above), and **a failure needs a mechanism before it is a finding** — the
+distinguishing datum was that a *requires-free* lemma inside the same
+`forall_intro` verified.
+
+| what | where |
+|---|---|
+| the proof | `codec-strict-isomorphism/probe-f42/VARINT_GOOD.fst` |
+| the record | same change, `research.md` F53 |
+
+---
+
+## 104. A proved hypothesis is not necessarily the hypothesis the consumer NEEDS — check the `requires`, not the statement
+
+Verified 2026-11-08, on the codec library's `varint` leaf (continues §94/§95).
+
+### The one sentence
+
+> **"I proved X and the next lemma takes X" is a two-part claim.**  Prove the
+> second part mechanically: instantiate the consumer at the caller's *actual
+> argument* and check the `requires` is satisfied **by X**, not just
+> satisfiable in principle.
+
+### The case
+
+`law_fwd` must show `dec (enc v ++ r) = Some (v, r)`.  A previous session
+proved exactly the fact it seemed to need:
+
+```fstar
+let lemma_encode_good (v: nat) : Lemma
+  (ensures good (seq_of_list (varint_encode_go … v [])) 0)     (* about `enc v` *)
+```
+
+and the consumer was already in the tree:
+
+```fstar
+let lemma_canon_agrees (s: byte_seq) (…) : Lemma
+  (requires good s from /\ …)                                  (* about the WHOLE `s` *)
+```
+
+The next session was handed "compose them; all three pieces exist and verify".
+**They cannot compose.**  The caller's `s` is `enc v ++ r`, so the consumer
+demands `good (enc v ++ r) 0`, and that is **false** — `good` quantifies over
+every terminating byte *past* `from`, and `r` is arbitrary.  Two lines refute
+it, and they verify:
+
+```fstar
+let lemma_good_not_preserved_by_append () : Lemma
+  (requires good (Seq.create 1 (U8.uint_to_t 1)) 0)
+  (ensures ~ (good (Seq.append (Seq.create 1 (U8.uint_to_t 1))
+                              (Seq.create 1 (U8.uint_to_t 0))) 0))
+  = ()
+```
+
+### Why this is §95's family and worth its own entry
+
+§95 says *an unproved obligation is not evidence that it is hard*.  This is the
+mirror: **a proved obligation is not evidence that the next step is done.**
+The proof was real; the *reuse* was never checked.  The error is a modelling
+one — treating the lemma's statement as the interface, when the interface is
+the consumer's `requires`.
+
+**The check costs one prose line and one instantiation.**  Before recording
+"unblocked", write the consumer's `requires` with the caller's arguments
+substituted, and ask whether your new fact matches it *syntactically*.
+
+### The repair that usually follows: window the predicate
+
+The proved fact was about a *region*, and the consumer wanted it about the
+*whole sequence*.  The fix is to give the consumer the region, not to prove a
+stronger global fact (which is false):
+
+```fstar
+(* the window the decoder actually reads *)
+let good_upto (e: byte_seq) (from: nat) (lim: nat) : prop =
+  lim <= Seq.length e /\
+  (forall (i: nat). from <= i /\ i < lim ==>
+    U8.v (Seq.index e i) < 128 ==> U8.v (Seq.index e i) % 128 <> 0)
+```
+
+A decoder never looks past its own stopping point, so a predicate over
+`[from, lim)` is exactly as strong as one over `[from, |s|)` **for the
+decoder** — and unlike the global version it survives an arbitrary suffix.
+Verify this shape, too: the windowed agreement lemma needs one extra
+hypothesis (no continuation byte is the *last* one consumed), and that
+hypothesis is an obligation, not a freebie — which is exactly why the repaired
+lemma is recorded as "a verified shape with an open obligation", not as
+progress.
+
+### ⚠ Companion trap, re-confirmed here
+
+**An `admit ()` body verifies silently.**  The draft of this session's probe
+file contained two `admit ()`s and `fstar.exe` printed
+
+```
+Verified module: VARINT_LAWFWD
+All verification conditions discharged successfully
+```
+
+A grep-based no-admit gate is the only thing that distinguishes this.  Never
+read "All verification conditions discharged" as "proved" — read the
+no-admit check.
+
+| what | where |
+|---|---|
+| the refutation of the composition | `codec-strict-isomorphism/probe-f42/VARINT_GOOD_APPEND.fst` |
+| the windowed repair | same change, `probe-f42/VARINT_LAWFWD.fst` |
+| the record | same change, `research.md` F54 |
+
+---
+
+## 105. Assembling a multi-lemma law: key every helper on the ARGUMENTS, never on a `let`-bound local
+
+Verified 2026-11-08.  This is the *mechanics* companion to §104: §104 stops you
+reusing the wrong hypothesis; this stops a correct chain from failing to
+compile together.  Cost ~12 rounds on one `law_fwd`.
+
+### The failure
+
+```fstar
+  = lemma_encode_good_any v;                       (* proves good (seq_of_list (enc v)) 0 *)
+    let e = seq_of_list (varint_encode_go (nbytes_of_varint v) 0 v []) in
+    lemma_good_to_upto e 0 (Seq.length e)          (* FAILS: cannot prove `good e 0` *)
+```
+
+The two forms are *definitionally equal* and the lemma has just been applied.
+It fails because **`good` is a `let`-bound `prop`** (§103): it will not unfold
+through a local binding into an argument position, so `good e 0` and
+`good (seq_of_list …) 0` are not interchangeable when `e` is a local.
+
+### The cure
+
+Key the helper on what you have (`v`), not on what you named:
+
+```fstar
+let lemma_enc_window (v: nat) : Lemma
+  (requires v < 34359738368)
+  (ensures good_upto (seq_of_list (varint_encode_go (nbytes_of_varint v) 0 v [])) 0
+                     (Seq.length (seq_of_list (varint_encode_go (nbytes_of_varint v) 0 v []))))
+  = lemma_encode_good_any v
+```
+
+Same for decoders: `lemma_last_terminates` produced an answer about
+`varint_decode_go e`, but the caller wanted `varint_decode_go (e ++ r)`.  The
+fix was a **prefix lemma** — prove once that the decoder's answer on `e`
+determines its answer on `e ++ r` when it stops inside `e` — rather than
+re-deriving at each use site.
+
+### State every lemma's `ensures` in ONE form
+
+The chain stalled four times purely on
+
+```
+Some (v, length (varint_encode_go …))        vs        Some (v, Seq.length e)
+```
+
+Each mismatch needed a bridging `assert`, and once two are in flight SMT loses
+the thread (the §89 signal, from bookkeeping rather than a bad definition).
+Fix the roundtrip lemma's conclusion to `Seq.length (seq_of_list …)` at the
+*source*; then every downstream `lim` matches with no bridge.
+
+### Two cheap facts that are NOT automatic
+
+- `Seq.append s Seq.empty == s` — needs `lemma_eq_intro` (F47 measured this;
+  third independent confirmation).
+- `U8.vu_inv` needs a `uint_t`-typed argument and `byte` is an abbreviation it
+  does not unfold: write `U8.vu_inv (k <: FStar.UInt.uint_t 8)`.
+
+### Deletion-testing a LAW (not a lemma)
+
+When the result is the whole chain, deleting a step can leave it green because
+SMT finds the step's *statement* in context and instantiates it.  So:
+
+- delete the **call** — green means "SMT can find it", not "not needed";
+- then **neutralise the statement** (rewrite the `ensures` to something
+  weaker/reflexive) and re-verify — that is the real test.
+
+Measured: `lemma_rt_general`'s call was removable, but neutralising its
+conclusion failed the law.  Both tests are needed; conflating them lets a
+tautology-looking step ship.
+
+| what | where |
+|---|---|
+| the finished law | `codec-strict-isomorphism/probe-f42/VARINT_LAWFWD.fst` |
+| the record | same change, `research.md` F55 |
+
+---
+
+## 106. A roundtrip stated at a *convenient* budget may not be usable at the real one
+
+Verified 2026-11-08, gluing a proved core into a law (continues §104/§105).
+The core proof was correct; **its statement was unusable**, and the fix was to
+restate it — not to add a hypothesis.
+
+### The shape
+
+A decoder with a fuel/budget parameter:
+
+```fstar
+let rec dec (f: int -> bool) (s: byte_seq) (k: nat) (a: int) (i: nat) : …
+  = if k = 0            then (if f a then Some (a, i) else None)   (* BUDGET *)
+    else if i >= |s|    then (if f a then Some (a, i) else None)   (* INPUT  *)
+    else if is_digit s[i] then dec f s (k-1) (a*10 + …) (i+1)
+    else if i = 0       then None
+    else (if f a then Some (a, i) else None)                       (* NON-DIGIT *)
+```
+
+Three ways to stop.  The earlier proof chose `k = |digits| + 10` — budget to
+spare — so it always stopped on **INPUT** or **NON-DIGIT** and carried a
+side condition `rest_at s (i + |ds|)`.
+
+The consumer's budget is `max_len`, and `wfcv` only guarantees
+`|digits_encode n| <= max_len`.  When they are **equal**, the decoder stops on
+**BUDGET**, and no condition on `s` holds or is needed.  So:
+
+| budget | stops on | side condition |
+|---|---|---|
+| `= |ds|` | BUDGET | **none** |
+| `> |ds|` | INPUT / NON-DIGIT | the `rest_at` disjunction |
+
+One peel cannot serve both.  **Two peels, dispatched at the call site:**
+
+```fstar
+if length ds = max_len then lemma_peel_exact  f ds s 0 0
+else                       lemma_peel_budget f ds s 0 0 (max_len - length ds)
+```
+
+`lemma_peel_exact` is *shorter* — it needs no hypothesis about the remainder at
+all, because `f (acc_digits ds a)` is the only thing consulted when the budget
+runs out.
+
+### The rules
+
+- **A roundtrip proved "with headroom" is not the roundtrip the law needs.**
+  Before reusing a core, write out the consumer's parameters substituted in,
+  and check *which branch* the decoder takes there.  (§104 for hypotheses,
+  this section for budgets.)
+- **A side condition that is sometimes vacuous should be split, not
+  generalised.**  Generalising `rest_at` over budgets is impossible; splitting
+  the peel gives one case that needs nothing.
+- **Read the decoder's `if`-chain first.**  Three stop branches here; the
+  first proof only ever reasoned about two.
+
+### Also measured (digits, this session)
+
+- `FStar.Seq.Properties.slice_slice s i1 j1 i2 j2` — **five** args; `i2, j2`
+  are offsets *within* the slice, not absolute; and `i2 <= j2` is a refinement,
+  so `tl = []` fails the call and must be split out.
+- Put a bound **inside** a `prop` used as a lemma argument:
+  `rest_at s i := i >= |s| \/ (i < |s| /\ i > 0 /\ …)`.  Without the inner
+  `i < |s|`, the definition's own `Seq.index s i` has no refinement and the
+  lemma cannot even be *stated*.
+
+| what | where |
+|---|---|
+| the two peels + the law | `codec-strict-isomorphism/probe-f42/DIGITS_LAWFWD.fst` |
+| the record | same change, `research.md` F56 |
+
+---
+
+## 107. When the CORE lemma is green and the wrapper is not, the STATEMENT is wrong — stop rewriting the proof
+
+Verified 2026-11-08, proving the lower bound on a decoded varint's value.  This
+is §89's diagnostic narrowed: §89 says "suspect the *definition*" when rlimit
+250+ fails with all facts in context; this says "suspect the *statement*" when
+an auxiliary lemma is **already proved** and the wrapper that uses it will not
+close.
+
+### The one sentence
+
+> If the arithmetic/structural lemma your wrapper calls verified **first
+> try**, then the wrapper's failure is in how the wrapper *phrases* its goal —
+> not in the maths it is doing.
+
+### The case
+
+The obligation was concrete and unambiguous:
+
+```fstar
+varint_dec s == Some (v, q) /\ q >= 2  ==>  v >= 2^(7 * (q - 1))
+```
+
+The arithmetic core — `lemma_acc_lower`, "a terminator with a non-zero group
+reaches `2^shift`" — verified immediately.  Three successive wrappers failed,
+and **each failure was a different off-by-one in the exponent of the
+`ensures`**:
+
+| draft's `ensures` | why it was wrong |
+|---|---|
+| `v >= pow2 shift` | `shift` is the *caller's* shift (0 at top level), not the terminator's |
+| `v >= pow2 (7 * (q - 1))` | right at the top level, wrong once recursive — the recursive frame has a different `p` |
+| `v >= pow2 (shift + 7 * (q - p - 1))` | right *shape*, off-by-one when composed across the recursive call |
+
+None of the three failed because the bound was false or hard — the same three
+facts (progress, non-negative value, the arithmetic core) closed the goal
+every time once the statement said the right thing.
+
+### The tell, and how to tell it apart from §89
+
+| | §89 (definition wrong) | this (statement wrong) |
+|---|---|---|
+| goal shape | your own non-recursive `let` unfolding | a *wrapper* around a lemma you already proved |
+| the core lemma | does not exist / is the thing you are patching | **exists, verified first try** |
+| rlimit | raising it changes nothing | raising it changes nothing either — so rlimit is *not* the diagnostic |
+| what to change | the definition | the **indexing of the invariant**: switch from a relative offset (`q - p - 1`) to the target quantity's **absolute** index, so every frame states the same expression |
+
+### Rules
+
+- **Write the arithmetic core as its own lemma and prove it first.**  If it is
+  green, you now have a hard boundary: the remaining work is statement design,
+  and further proof-writing is wasted effort.
+- **Prefer absolute indices over relative offsets in an `ensures` that
+  recurses.**  A relative offset must be re-derived at every frame
+  (`q - p - 1` becomes `q - (p+1) - 1`), and each re-derivation is an
+  off-by-one waiting to happen.  An absolute index (`q - 1`) is the same term
+  in every frame.
+- **The dependency-width signal (§93) is the interface:** if the *recursive
+  call* cannot be *stated* with the wrapper's conclusion substituted, it is a
+  statement problem before it is a proof problem.
+
+| what | where |
+|---|---|
+| the green core (`lemma_acc_lower`) and the stalled wrapper | `codec-strict-isomorphism` `probe-f42/VARINT_CANON.fst` |
+| the record | same change, `research.md` F60 |
+
+## 108. A `requires` you add to make a wrapper close can BE the counterexample's description
+
+Verified 2026-11-08 while assembling `law_bwd` for a canonical decimal decoder
+(continues §106, §100).  The sharpest form of the "green but wrong" family: the
+lemmas all verify, the assembly verifies, **and the law it claims is false.**
+
+### The one sentence
+
+> If a hypothesis is needed to make your statement **true** but no consumer's
+> proof **uses** it, suspect that hypothesis is describing the
+> counterexample — not a proof convenience.
+
+### The case
+
+`law_bwd` for `digits_to_int` is
+
+```fstar
+dec s = Some (v, r)  ==>  exists e. enc v = Some e /\ s == e ++ r
+```
+
+Assembling it from CANON (`q = ndigits v`) and a re-encoding bridge
+(`slice s 0 q == seq_of_list (digits_encode v)`) required "a success consumes
+at least one byte".  That step would not close, so `|s| >= 1` went into the
+lemma's `requires` — and then everything verified at rlimit 40, 0 admit.
+
+The hypothesis is the defect:
+
+```
+dc f "" 10 0 0 == Some (0, 0)        (* the decoder accepts the EMPTY input *)
+digits_encode 0 == "0"                (* one byte *)
+```
+
+So on the empty input `q = 0 != |enc 0| = 1` and `law_bwd` is **false**.  The
+decoder had been accepting a number's *absence* as the number `0` — a third
+instance of "decoder accepts input outside the encoder's image", and a shape
+the earlier sweep could not see because a sweep tests wrong *spellings*, never
+a string with no bytes.
+
+### The tell
+
+| looks like | actually |
+|---|---|
+| "the wrapper needs one more bound to close" | the wrapper's goal is **unprovable**; the bound is what makes a false statement true |
+| every other lemma in the file is green | they are green **because** they carry the same hypothesis |
+| the hypothesis is never consumed by any proof step | nothing discharges it; it only restricts the domain |
+
+### Rules
+
+- **State the law unconditionally first and let it fail.**  A failure there is
+  a result; a `requires` that suppresses it is a lost one.
+- **When a hypothesis restricts the input, test the excluded input by hand.**
+  Here `""` cost one 6-line probe.  The empty/degenerate case is the cheapest
+  counterexample candidate in any decoder law (§102's base-case rule, again).
+- **A `() : Lemma` body and an empty-bodied assembly both prove the
+  *statement*, never its usefulness** (§100's complement).
+- Corollary for sweeps: a canonicality sweep must include **the empty input and
+  the single-element input**, not only malformed spellings.
+
+| what | where |
+|---|---|
+| the false law, proved false on both decoders | `codec-strict-isomorphism` `research.md` F61 §3 |
+| the conditional-but-green assembly | `probe-f42/DIGITS_CANON.fst`, `lemma_digits_law_bwd` |
+
+## 109. Two small measured facts: re-declaring `seq_of_list`, and `match` under a known scrutinee
+
+Both measured 2026-11-08 in the same session, both cost a restart each.
+
+### (a) The stdlib `seq_of_list` refinement is FREE; a local re-declaration loses it
+
+`FStar.Seq.Base.fsti` declares
+
+```fstar
+val seq_of_list (#a:Type) (l:list a) : Tot (s:seq a{List.length l == length s})
+```
+
+so `Seq.length (Seq.seq_of_list l) == length l` is **automatic**.  A module that
+re-declares its own `seq_of_list` (common in self-contained probes) drops that:
+measured quartet, all with `i < length ds` in scope and the goal
+`i < Seq.length (append (seq_of_list ds) a)`:
+
+| form | proves? |
+|---|---|
+| local `let rec seq_of_list : Tot byte_seq` | ❌ |
+| local, `Tot (s:byte_seq{ length l == Seq.length s })` | ✅ **free** |
+| local + `lemma_len_seq_of_list` called at the use site | ✅ |
+| the same length supplied as an explicit hypothesis | ✅ |
+
+Three modules in `codec-strict-isomorphism/probe-f42/` carry a
+`lemma_len_seq_of_list` purely because of row 1.  **Restating the refinement
+deletes the lemma.**  Row 3 also explains why `Seq.lemma_len_append` alone is
+sometimes not enough: it gives the append's length, but the *operand* lengths
+still have to be known.
+
+### (b) `match f a with ...` does not reduce under `f a = true` in context
+
+A base-case lemma stated as
+
+```fstar
+ensures dc f s k a i == (if f a then Some (a, i) else None)
+```
+
+does **not** discharge, even with `f a = true` and
+`dc f s k a i == Some (v, q)` both in the context.  The `match`/`if` on a
+*symbolic but constrained* scrutinee stays opaque.  Fix: state the base case
+**once per branch** —
+
+```fstar
+let base_end_t (...) : Lemma
+  (requires ... /\ f a = true)  (ensures dc f s k a i == Some (a, i)) = ()
+let base_end_f (...) : Lemma
+  (requires ... /\ f a = false) (ensures dc f s k a i == None) = ()
+```
+
+— and call the matching one inside an `if f a then ... else ...`.  This is the
+same family as §102 ("SMT proves the unfolded equation, will not derive it"),
+narrowed to a scrutinee the context constrains but does not substitute.
+
+## 110. Before offering a decision, grep the spec for the requirement it falls under
+
+Verified 2026-11-08.  Not an F\* fact — a process fact about *verified
+projects*, earned here because it cost a session.
+
+### The one sentence
+
+> If a requirement already answers the question unambiguously, the task is to
+> **apply** it and record the application; presenting it as a menu is not
+> neutrality, it is inviting a re-litigation the requirement exists to prevent.
+
+### The case
+
+A decoder accepted the empty input, making the backward law false there.  The
+research record offered three resolutions: (a) tighten the decoder, (b) record
+it as an accepted exception, (c) treat the input as in-domain.  The next
+session was asked to choose.
+
+But the spec already said, in a requirement written months earlier:
+
+> A decoder that accepts non-image input SHALL be treated as **defective and
+> fixed, not as a property to record.**  … the leaf's domain SHALL NOT be
+> narrowed, to make the defect unobservable.
+
+(b) is the first sentence's negation; (c) is the second's.  **Only (a) was ever
+live.**  One session was spent choosing between two forbidden options and one
+foregone conclusion.
+
+### The tell
+
+- **Two of the options can only be taken by weakening something.**  A
+  requirement forbidding weakening does not leave a menu.
+- The options differ in *whether the obligation holds*, not in *how to meet it*.
+  Legitimate choices are between mechanisms (guard the decoder / refine the
+  type / derive the fact); illegitimate ones are about whether to keep the law.
+- You are about to write "the user owes the decision" about a property a
+  `SHALL` covers.
+
+### Rules
+
+- **Grep the spec (and the README's `[D*]`/`[S*]`/`[W*]` table) before framing
+  a decision.**  In this repo the requirement names are stable
+  (`REQ-ISO-*`), so this is one `grep`.
+- If the spec is genuinely silent, then decide — and **say which requirement
+  you are reading it into**, so the next session inherits a reason rather than
+  a ruling.
+- When recording a decision that a document already made, record **the
+  application**, not a fresh argument.  A re-argued settled question reads as
+  open and will be reopened.
+
+| what | where |
+|---|---|
+| the framing error and its correction | `codec-strict-isomorphism` `research.md` F61 §6 (superseded) and **F62 §1** |
+| the requirement that decided it | same change, `specs/codec/spec.md`, `REQ-ISO-CANONICAL` |
+
+## 111. A lemma can be TRUE only BECAUSE the defect is there — so fixing the defect falsifies a lemma two files away
+
+Verified 2026-11-09, fixing the decoder whose empty-input defect §108 records.
+Continues §108; this is its mirror image — there the hypothesis hid the defect,
+here a **neighbouring lemma silently depended on it**.
+
+### The one sentence
+
+> Before changing a decoder's branch, ask which of its lemmas are stated about
+> the *current behaviour* rather than about the *law*; those are the ones the
+> fix falsifies, and they will not show up in a grep for the change.
+
+The fix was one conjunct at two stop branches:
+
+```fstar
+-  if k = 0 then if f a then Inr (a, i) else ...
++  if k = 0 then if f a && i > 0 then Inr (a, i) else ...
+```
+
+Everything still verified except **one** lemma, two files away from the defect,
+whose single equation was
+
+```
+dec s k a i == match dec (slice s i |s|) k a 0 with
+               | Inl e    -> Inl (e + i)
+               | Inr (v,n) -> Inr (v, n + i)
+```
+
+It went from true to **false**, and the countercase is two lines:
+
+```
+dc "11" 0 1 1 == Some (1,1)          (* i > 0 at the k=0 stop -> succeeds       *)
+dc (slice "11" 1 2) 0 1 0 == None    (* the slice restarts at i = 0 -> fails     *)
+```
+
+The equation quantifies over an *offset*, and the offset is exactly what the
+new guard reads.  **A lemma stated "decode from offset `i` = decode from 0 on
+the slice" is stated about the offset, so any change to an offset-dependent
+guard can falsify it.**
+
+### The isolation method (cheap, and it localises the blame)
+
+1. Re-prove the suspect lemma against the **old** definition.  If it verifies,
+   the lemma is not stale for unrelated reasons.
+2. Change **one branch** and re-run.
+3. The failing goal names the branch.  Here it named the `Inl`/`None` side —
+   "the full decode succeeds, the slice fails" — which is the guard speaking,
+   not the induction.
+
+Without step 1 there is no control, and you cannot tell a falsified statement
+from a drifted proof.
+
+### The symptom that it is a RESTATEMENT, not a patch
+
+Every repair attempt failed on a **range invariant**, never on the maths:
+
+| form | what broke |
+|---|---|
+| `Inr` branch only | the IH no longer applies at the next offset without unfolding first |
+| carry the full count, prove `slice = full - i` | needs `n >= i` **and** `n >= i + 1` established per step |
+| state `n - i` | `nat` subtraction drags the bound into the `requires` |
+| `dec_nat k > 0` from `k > 0` | false at `k = 1`; needs its own `k > 1` lemma, changing every caller's guard |
+
+Four different shapes, one cause: the lemma's **contract** is offset-indexed
+and the guard made the offset observable.  When each fix fails on a different
+precondition and none on the theorem, stop fixing and restate the contract —
+§107 again, one level up: there the exponent was relative, here the **index**
+is.
+
+### Rules
+
+- **State an offset lemma at the offsets actually used.**  Both call sites were
+  `i = 1`.  A lemma generalised to symbolic `i` was costing a range invariant
+  per frame for a generality nothing consumed.
+- **Prefer "decode the tail" over "decode from offset i".**  If `slice s 1 ==
+  t` is already asserted at the call site, the needed fact is
+  `dec s k a 1 == dec t k a 0` — a statement with no arithmetic in it.
+- **A decoder fix that passes every *behavioural* probe can still break
+  `src/`.**  Six inputs probed clean (`""`, `"0"`, `"01"`, `"123"`, at
+  several budgets) while one lemma in the same file was false.  Behaviour
+  probes do not substitute for a full re-verify.
+- **Revert and record rather than leave red.**  The fix is correct; the
+  restatement is not done.  A red `src/` with a half-designed lemma is worse
+  than a green `src/` plus an exact countercase and two named next steps.
+- Corollary to §110: applying a decided requirement is still *work*, and the
+  work can be larger than the decision record predicted.  Say so in the
+  ledger instead of marking the task done.
+
+### Three process rules, each of which cost real time this session
+
+- **Build a standalone scratch copy before restating a library lemma.**  Every
+  unsuccessful attempt here was run against a *hand-retyped* copy of the
+  decoder in `/tmp`, which dropped a `requires` conjunct (`a >= 0`) and
+  produced failures that did not exist in the real file.  A scratch module
+  that is not byte-identical to the real definition tests a different theorem.
+  Either copy the definitions **verbatim** with `sed` from the real file, or
+  work in the real file and revert (see the last bullet).
+- **`make check` reports "Nothing to be done" on a stale cache.**  It does not
+  track dependencies, so a changed `Types.fst` can look green.  Force a real
+  baseline with `make check OUT=/tmp/<fresh-dir>` before and after any `src/`
+  edit — otherwise "green" is the previous session's result.
+- **Isolate a falsified lemma against the OLD definition first** (the
+  three-step method above).  Skipping the control is what makes a falsified
+  *statement* look like a drifted *proof*, and sends you rewriting tactics for
+  a defect that no tactic can fix.
+
+A fifth, from §110's family: when a task turns out larger than its decision
+record predicted, **update the task list with a new sub-task** (here `T1.7f.1a`
+inserted *before* `T1.7f.1`) rather than broadening the existing one.  The
+order of the sub-tasks is the finding.
+
+| what | where |
+|---|---|
+| the falsified lemma and its two-line countercase | `codec-strict-isomorphism` `research.md` **F63 §3** |
+| the four failed shapes, and the two next steps | same, F63 §4–§5 |
+| the defect the lemma had been resting on | same, F61 §3 / §108 |
+| the resulting task order (`T1.7f.1a` before `T1.7f.1`) | same change, `tasks.md`, T1.7f |
+
+## 112. A guard that READS AN INDEX makes every same-depth restatement false — the survivor is the one that does not identity the two sides
+
+Verified 2026-11-09, the continuation of §111.  §111 says *which* lemmas a
+decoder fix falsifies.  This says **why most restatements cannot work**, so you
+stop writing them.
+
+### The one sentence
+
+> When the new guard reads an argument (`i > 0`), the decoder becomes
+> **observable in that argument at the stop**, so no lemma *equating* the two
+> sides at equal depth can hold — only a lemma whose conclusion is one-sided
+> (an `Inr` implication) survives.
+
+### The case
+
+The fix (§111) added `i > 0` at the `k = 0` stop.  Three restatements of the
+shift lemma, in the order tried:
+
+| # | statement | verdict |
+|---|---|---|
+| 1 | `dec s k a 1 == dec t k a 0` for all `k` | **FALSE at `k = 0`.**  `dec s 0 a 1` returns a value when `f a` (since `i = 1 > 0`); `dec t 0 a 0` rejects at `i = 0`.  The offset *is* the discriminator. |
+| 2 | that + `requires k > 0` | **cannot survive the recursion.**  `dec_nat 1 = 0`, so a child frame needs the statement at `k = 0`.  This is a *depth* invariant, and `decreases` forces the depth-0 frame to exist. |
+| 3 | `Inr`-only: `dec t k a 0 == Inr (v,n) ==> dec s k a 1 == Inr (v,n+1)` | **survives** — the `k = 0` disagreement is out of scope *by construction*, because nothing is claimed about the rejection side. |
+
+### Rules
+
+- **Classify the fix before restating anything.**  Did the guard read an
+  argument that the lemma's *statement* mentions?  If yes, ask which side is
+  observable, and state the lemma **one-sidedly** from the start.  Skipping
+  this is why shapes 1 and 2 get written: each looks like "the same lemma,
+  tightened".
+- **A hypothesis that must hold at every recursion frame is a depth
+  invariant, and `k > 0` is not one** when the step is `k := k - 1` and
+  `k = 1` is reachable.  If the statement is false at the floor, the floor must
+  be *excluded from the statement's scope*, not excluded by `requires`.
+- **A hypothesis the consumer can satisfy but the recursion cannot maintain is
+  a statement bug, not a missing lemma.**  The consumer here reached `k >= 2`
+  only at the *top* frame; the IH still had to live at `k = 0`.
+- **Recognise the tell `slice s 1 (|s|) == s`.**  When the SMT context at the
+  failure contains a plainly false sequence equation, the obligation is
+  **under-constrained**, and adding more `assert`s will not close it — stop
+  and check the facts are *stated*, not assumed to be synthesized.
+
+### When the survivor still will not close: list the index facts first
+
+Shape 3 was one lemma short, and the missing lemma was not arithmetic:
+**nothing in the library related `Seq.index (slice s 1 (|s|)) j` to
+`Seq.index s (j+1)`.**  Every shape that relates a tail's index to a whole's
+index needs it.  Before writing a sequence restatement, **write the
+`index`/`slice` bridge lemma, or confirm it exists, for every such pair the
+statement mentions.**  Guessing which `Seq` facts SMT will synthesise is the
+single largest cost in this family of proofs.
+
+### ⚠ CORRECTION (2026-11-09): the index bridge was NOT missing — it was
+### searched for by name, in one file
+
+This section first said "nothing in the library related
+`Seq.index (slice s 1 (|s|)) j` to `Seq.index s (j+1)`".  **That was false.**
+`FStar.Seq.Base.lemma_index_slice` states exactly it, and is `SMTPat`-triggered
+on the goal term:
+
+```fstar
+val lemma_index_slice: #a:Type -> s:seq a -> i:nat -> j:nat{i <= j /\ j <= length s}
+  -> k:nat{k < j - i} -> Lemma
+  (ensures (index (slice s i j) k == index s (k + i)))
+  [SMTPat (index (slice s i j) k)]
+```
+
+The search that "proved" it missing was `grep 'index_slice\|slice_index'`
+**inside this project's file**.  Two rules:
+
+- **Before writing a bridge lemma, grep the stdlib `.fsti` for the
+  CONCLUSION'S SHAPE, not for a name.**  `FStar.Seq.Base.fsti` and
+  `FStar.Seq.Properties.fsti` are ~600 lines each and settle the question in
+  seconds.  Names in the stdlib are not uniform (§109's lesson, one level up:
+  a fact lives in `Seq.Base` precisely where everyone looks in
+  `Seq.Properties`).
+- **`slice_slice` is `slice s 0 (|s|) == s`** — `SMTPat`'d, fires constantly,
+  and is useless for outer-endpoint rewriting.  It yields an *inner* endpoint
+  (`slice (slice s 0 |s|) 1 (|s|-1) == slice s 1 (0 + (|s|-1))`), never
+  `slice s 2 |s|`.  A slice equation you *do* need is pointwise:
+  `Seq.lemma_eq_intro` with both lengths spelled out.
+
+### What actually blocks the `Inr`-only restatement
+
+The blocker is **not** a slice or index equation.  Stating it at `i = 1` and
+unfolding both decoders (which is mandatory — SMT proves an unfolded equation
+but never derives it from the call, §102), the induction reaches the child
+frame and needs `is_digit (index s 1)`, then `(index s 2)`, … — i.e.
+**an `Inr`-only shift lemma must carry the digit RUN as a hypothesis**
+(`forall j. …`), because it claims nothing on the rejection side and so has no
+`()` to discharge a digitless branch the way an *equation*-shaped lemma does.
+
+Rule: when a one-sided (`Inr`-only) form of a previously two-sided lemma needs
+more and more head facts, **the side you gave up was carrying the invariant**.
+Re-add it as a run-`forall` hypothesis, or eliminate the lemma at the consumer
+— do not add one more head fact.
+
+### The decision procedure (verified 2026-11-09, so use it FIRST)
+
+After six failed shapes of one lemma, the move that worked was mechanical and
+cheap: **delete the lemma at its consumer and write the consumer's induction.**
+The obligation that will not close is a *single* equation, and it names exactly
+what the lemma must say — in minutes, where restating the lemma abstractly cost
+one dead end per session.
+
+Then, having isolated the equation, **find where it is false.**  Here it held at
+no index at all:
+
+> The equation `dec s k a 1 == dec (slice s 1) k a 0` is **FALSE at `k = 0`**:
+the `k = 0` stop sees `i = 1 > 0` and succeeds, while the slice's stop sees
+`i = 0` and rejects.  This holds at `i = 1` as well as symbolically — so **no
+restatement that equates the two decodes can hold at any `i`.**
+
+The generalisation, and the thing to test *before* writing a restatement:
+
+> **Ask which argument the countercase varies.**  Every failed shape here
+> varied the *index* and left the *budget* free — and the countercase lived at
+> `k = 0`.  The surviving hypothesis was on the **budget** (`1 <= k`), which
+> puts the floor out of scope *by construction* and needs no run-`forall`.
+> An equality at `k >= 1` carries the invariant an `Inr`-only form had to give
+> up; an `Inr`-only form does not need the budget hypothesis.  Pick the side
+> whose hypothesis the *consumer* can actually supply, and check the consumer's
+> `decreases` argument for whether it reaches the countercase's value.
+
+| what | where |
+|---|---|
+| three shapes, verdicts, and the (mis-stated) index lemma | `codec-strict-isomorphism` `research.md` **F64** |
+| the correction: the bridge existed; the real blocker is a run-`forall` | same, **F65** |
+| the consumer with the lemma deleted; the `k = 0` refutation; budget-not-index | same, **F66** |
+| the fix that made the guard index-reading | same, F63 §1; §111 |
+
+## 113. A decoder that reports its CURSOR is not reporting a COUNT — cross-index count linkage is false at every stop
+
+Verified 2026-11-09, refuting the statement form §112's predecessor had proposed.
+Continues §111/§112; corrects the last line of §112's table.
+
+### The one sentence
+
+> A decoder that returns `Inr (v, i)` at its stops reports **where the frame
+> stopped**, not **how many bytes it consumed**.  So a lemma relating two
+> decodes at different indices can link their counts across a **step**, but
+> never **at a stop** — and a recursion that decrements the budget lands on a
+> stop at its floor.
+
+### The case
+
+The decoder (a digit reader, `decreases k`, cursor `i`):
+
+```fstar
+if k = 0 then if f a then Inr (a, i) else ...
+else if i >= Seq.length s then if f a then Inr (a, i) else ...
+else <digit> -> recurse with (k-1, a', i+1)
+```
+
+Every `Inr` returns `Inr (a, i)`.  It was inferred — plausibly — that "the
+consumed count **is** the index", hence two decodes at indices `i` and `j` have
+counts linked by their difference.  **That half is wrong.**  Measured:
+
+| shape | counts |
+|---|---|
+| same decode, **one digit step apart** | differ by exactly the offset ✅ |
+| two **stops** at different indices (different inputs) | each reports its own index ❌ |
+
+Refuted **symbolically for every digit** (so not a one-point counterexample):
+
+```fstar
+(* s = [d], a one-digit input, budget 1, cursor 0 *)
+dec (slice [d] 0 1) 1 0 0         == Inr (v d - 0x30) 1   (* the premise *)
+dec (slice [d] 1 1) (dec_nat 1) (v d - 0x30) 0
+                                  == Inr (v d - 0x30) 0   (* the tail: a STOP *)
+(* the lemma demanded count 1; the value agrees, the COUNT does not *)
+```
+
+### Why this keeps happening in this family
+
+The failing lemma's frame is always **after a step** and the hypothesis always
+looks reasonable, so the stop is invisible until the budget reaches its floor.
+Three sessions in a row proposed a statement whose countercase lived at that
+floor: §112's `k = 0` equality, then a "budget hypothesis" `1 <= k`, now the
+count linkage.  Each is a **different variable** (index, budget, count) with the
+same obstruction.
+
+### Rules
+
+- **Classify what `n` MEANS before linking it.**  Ask: does the stop return a
+  count, or the cursor it was handed?  Read the two stop branches.  If they
+  return `i`, then `n` is a position and only a *normalised* count
+  (`n - i_start`, with `i_start` carried) is a quantity you can add across
+  decodes.
+- **Test the linkage at the floor first**, not in the middle.  Instantiate the
+  statement with the smallest budget that can reach it and *evaluate both sides
+  by `()`*.  This is minutes of work and it caught a form that had been proposed
+  with "nine tenths proved".
+- **A refutation is a shippable module.**  Hold it **symbolic in the parameter**
+  where possible (`d: byte` with `is_digit d`): it generalises, and it avoids
+  the `U8.vu_inv` friction a literal index would need.
+- **§112's table, last line, is corrected:** an `Inr`-only restatement does
+  **not** automatically survive.  What survives is a **value-level**
+  implication — `dec s k a 1 == Inr v n ⟹ dec (slice s 1) k a 0 == Inr v (n-1)`
+  — not an equality of `decode_result`s, and not a count linkage.
+- **When the prescription is followed and the obligation MOVES rather than
+  closes, stop and evaluate the goal.**  Here the plumbing fix worked exactly as
+  predicted, which is what made the statement's falsity visible.  "The obstacle
+  is the tool's rewrite plumbing" was wrong for the fourth session running.
+
+| what | where |
+|---|---|
+| the refutation, symbolic, 0 admit | `codec-strict-isomorphism` `probe-f42/STEPCNT_FALSE.fst` |
+| the record, incl. the value half that *is* true | same change, `research.md` **F68** |
+| the superseded form | same, **F67** (banner); §112's table |
+
+## 114. A session that starts from a summary will reconstruct the GOAL as a new one — grep the decision record for the goal's own words
+
+Verified 2026-11-09.  Not an F\* fact.  Recorded because it is the failure mode
+that costs the most across sessions, and because it now has a mechanical guard.
+
+### The one sentence
+
+> A goal that already appears in **the recorded basis of a decision** is not a
+> new goal.  Restating it as one invites a "tension" between two halves of the
+> same plan, and "open" in a ledger is not "abandoned".
+
+### The case
+
+A project had its delivery criterion written down verbatim, inside the record
+of a decision it had driven:
+
+> *"full correctness in code and speed extracted to C … No shortcuts.  Full
+> proofs."*
+
+That sentence was **why two of three candidate designs were eliminated**.  Six
+sessions then went into one lemma.  The next session read those six sessions,
+inferred *"the project is stuck"*, and — when the user restated the criterion —
+wrote a whole section on how the new priority "pulled against a decision already
+recorded".
+
+**Wrong in both halves.**  The goal had not changed; it was the recorded premise
+of an existing decision.  And there was no tension: the strict-law work *was*
+the "correctness" half and the performance ledger rows were the "speed" half.
+Same plan, different rows.  What was true was a **scheduling** observation (six
+sessions on one lemma; the speed rows untouched) — a fact about where effort
+went, misreported as a conflict of goals.
+
+### The mechanism, stated plainly
+
+A summary compresses *findings* and drops *premises*.  So a session that reads
+summaries inherits the conclusions and loses the criteria those conclusions were
+drawn against — and then, when the criterion is mentioned, it has nowhere to
+place it except "new requirement".  The record said **open**; the summary read
+like **de-scoped**.
+
+### Rules
+
+- **Before framing anything as a change of direction, grep the decision record
+  for the goal's own words.**  In this repo the goal has a name
+  (`REQ-ISO-GOAL`), so it is one grep.  If it appears in the basis of a
+  decision, it is not new.
+- **Distinguish a scheduling fact from a goal conflict.**  "This is not being
+  worked on while X is" is a fact about effort.  "This contradicts what we
+  decided" requires naming the decision and quoting it.
+- **Make the goal have a name and a single home.**  A goal that lives in a
+  session header, a ledger row, and a commit message will be re-derived
+  differently in each.  Give it one requirement, and make every other mention a
+  **pointer**.
+- **Write the anti-drift rule into the spec**, not just the skill: *"a goal
+  appearing in a ledger, an AGENTS.md header, or a commit message is a pointer
+  to this requirement, never an independent definition"*, and *"'open' in a
+  ledger means 'not yet done', never 'no longer wanted'"*.
+- Corollary: keep session-state files (AGENTS.md and the like) **thin** —
+  pointers, conventions, commands.  Narrative state belongs in the change's
+  `research.md`, which is versioned with the evidence.  When a header grows to
+  hundreds of lines of findings, it has become a second, unverified source of
+  truth.
+
+| what | where |
+|---|---|
+| the failure and its correction | `codec-strict-isomorphism` `research.md` **F69** |
+| the goal, now named once | that change's `specs/codec/spec.md`, **`REQ-ISO-GOAL`**; and `openspec/specs/codec/spec.md` "The delivery criterion" |
+| the thin-pointer rewrite of the session guide | `xeno` `AGENTS.md` (916 → 143 lines) |
