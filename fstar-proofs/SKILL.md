@@ -8517,3 +8517,65 @@ like **de-scoped**.
 | the failure and its correction | `codec-strict-isomorphism` `research.md` **F69** |
 | the goal, now named once | that change's `specs/codec/spec.md`, **`REQ-ISO-GOAL`**; and `openspec/specs/codec/spec.md` "The delivery criterion" |
 | the thin-pointer rewrite of the session guide | `xeno` `AGENTS.md` (916 → 143 lines) |
+
+## 115. A lemma you keep PATCHING was stated about the wrong object — generalize the CONSUMER, and the lemma stops being needed
+
+Verified 2026-11-09 (`fstar-codec` `5d4b7d6`).  The cheapest fix for a lemma
+that survives five sessions of restatement is often to **delete it**.
+
+### The one sentence
+
+> If a lemma relates `f x i` to `f y j` and keeps being false or unprovable,
+> ask whether the *caller* should have been stated at the `i` the function
+> actually walks.  Then the hypothesis applies to the recursive call **on the
+> same argument** and no cross-argument lemma is needed at all.
+
+### The case
+
+`digits_to_int_decode_go f s k a i` walks ONE sequence `s`, incrementing `i`.
+A downstream lemma needed "the decode from index 1 on `s` relates to the decode
+from index 0 on `slice s 1`".  Sessions tried: an equality of the two results
+(refuted at `k = 0`), a one-sided slice (true, not inductive on `k`), carrying
+the consumed count (refuted — see §113), and stating it at the consumer's own
+sequence (reduces to the same step).
+
+All four were restatements of the *wrong* statement.  The fix was to generalize
+the **consumer** over `i`:
+
+```fstar
+lemma_digits_walk f s i ds k a     (* hypothesis speaks about `s` at index `i` *)
+  ... ensures dec f s k a i == Inr (acc_digits ds a) (i + |ds|)
+  = ... lemma_digits_walk f s (i + 1) tl k' a'    (* SAME `s` — IH applies *)
+```
+
+The recursive call passes the **same** `s`, so the IH applies unchanged.  The
+old lemma was then **deleted**, not restated.  Cost of the whole fix: one
+generalization plus one slice lemma.
+
+### Why it works
+
+The induction hypothesis of a generalized statement is *reflexive* on the
+argument that does not change.  A statement that mentions two different
+sequences (or two different indices on one) forces you to prove a relation
+between them at **every** step — the accumulating-bridge failure — which is
+what made four designs fail.
+
+### The diagnostic
+
+When a lemma's proof keeps failing at the same *shape* rather than the same
+*goal*: stop rewriting the lemma.  Print the recursive call it must relate and
+ask "does my hypothesis mention this exact call?".  If not, generalize the
+statement until it does.
+
+### Companion: the premise must be the one the CODE tests
+
+The first version of the generalized walk took a stop premise written from the
+*caller's* disjunction, and was **false**: the decoder's stop test is
+`i >= Seq.length s`, so "the block ended" is a legitimate stop that the caller's
+phrasing omitted.  I wrote a lemma asserting the missing case implied `n = k`,
+then refuted it with a concrete instance (`n = 1, k = 5, rlen = 0` satisfies the
+premise; `1 ≠ 5`).
+
+> **A premise that looks like the caller's is not necessarily the decoder's.**
+> Read the `if`s in the function body and mirror *those*, not the caller's
+> comment about them.

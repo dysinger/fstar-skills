@@ -748,3 +748,55 @@ it as a regression.
 |---|---|
 | the check | `fstar-codec/check-readme-parity.sh` |
 | the record | `codec-strict-isomorphism/research.md` F57 |
+
+## 13. Verifying ONE module by hand: the four flags, and the three ways it silently misleads
+
+Verified 2026-11-09 (`fstar-codec`).  Needed whenever you verify a scratch
+module or one file without `make check`.
+
+### The command that works
+
+```bash
+work=$(mktemp -d); mkdir -p "$work/out"
+cp "$FSTAR_CHECKED"/*.checked "$work/out/" 2>/dev/null        # (2) below
+UIDIR="$(fstar.exe --locate_lib)/ulib"
+fstar.exe --no_default_includes --include "$UIDIR" \
+  --include "$REPO/src" --include "$REPO/test" \
+  --already_cached 'Prims,FStar,Pulse.Nolib,Pulse.Lib,Pulse.Class,PulseCore' \
+  --z3rlimit 120 --cache_checked_modules --cache_dir "$work/out" --odir "$work/out" \
+  "$work/Mod.fst"
+```
+
+### The three traps
+
+1. **`Error 141: Interactive mode only supports a single module. Expected
+   module X`** — the *filename* must equal the module name.  Spike files whose
+   names do not match (`spike-alt.fst` declaring `module AltA5`) must be **copied
+   into a scratch dir under the module name** first.  That is why spike runners
+   carry a `file:Module` table.
+2. **`Error 317: Expected Prims to be already checked`** — you must seed
+   `--cache_dir` from `$FSTAR_CHECKED` (the devShell's pre-verified stdlib).
+   Without the seed, `--already_cached` has nothing to find and every run
+   re-checks `Prims`.
+3. **`Warning 241: Unable to load ... does not exist; will recheck`** — expected
+   on a fresh scratch dir; it is noise, not a failure.  Do not "fix" it by
+   dropping `--already_cached`.
+
+### F\* comment nesting bites the shell pipeline
+
+`(\*` opens a comment, and a stray `*)` in prose **closes the file's header
+early**.  In this session, writing an inline `(\* ... *)` inside an already-open
+doc comment produced `Error 168: unexpected char` three times.  Rules:
+
+- never write `(\*` inside a comment; use plain prose;
+- if you edit comments with `python3`/`sed`, prefer removing the comment over
+  escaping it;
+- a `*)` in the *prose* of a header ends the doc comment, so every later
+  declaration becomes "top-level code" and errors look unrelated.
+
+### A file that verifies is the only evidence; a file that parses is not
+
+Several iterations this session ended with "Verified module" printed *and* an
+error, because the last declaration failed but earlier ones succeeded.  **Grep
+for both `Verified module` and `Error` and read the exit code** — `=== exit=$? ===`
+on its own line is the only reliable witness.
