@@ -1,22 +1,22 @@
 name: fstar
-description: F* programming language for verified systems
+description: F* (FStar) — the current toolchain: Custard extraction from Pulse stateful code, Z3 5.3.0, no KaRaMeL/Low*.
 
 rules: |
   ## F* Core Syntax Rules
 
   - Custom operators use `let ( <op> ) args = body` with whitespace around parens
   - Numeric types use module syntax: `FStar.UInt64.t`, `FStar.Int32.t`, NOT `u64`, `int32`
-  - Multiplication: in ≤ 2025.12.15 `a * b` is a TUPLE TYPE and `*`-as-multiply needs `open FStar.Mul`; in ≥ v2026.09.20 `FStar.Mul` is DELETED and `*` IS multiplication
+  - Multiplication: `a * b` IS multiplication — no `open` needed. `FStar.Mul` does not exist (`open FStar.Mul` is `Error 134`); a pair type is `a & b`
   - Record types with function fields need `noeq` to skip decidable-equality proof
   - Mutually recursive types use `and`, not `noeq`
-  - `decreases` goes inside the return type: `Tot result (decreases x)`
+  - `decreases` goes inside the return type: `Tot result (decreases x)`; arithmetic of two bare vars in it is a parse error
 
   ## Effects
 
   - `Tot a` — total pure
   - `GTot a` — total ghost (erased at extraction)
   - `Lemma (requires pre) (ensures post)` — squashed proof
-  - `Stack` — Low* stateful, extractable to C (≤ 2025.12.15; in ≥ v2026.09.20 use Pulse `fn`)
+  - Stateful code is Pulse (`#lang-pulse`, `fn`, `pts_to`) — the only C-extractable language; see the fstar-build skill
 
   ## Module Syntax
 

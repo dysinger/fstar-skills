@@ -1,13 +1,11 @@
 ---
 name: fstar-proofs
-description: F* proof patterns — lemmas, SMTPat, induction, GADT type-refinement barriers, mutual rec, Ghost/Stack bridging, and common proof errors.
+description: F* proof patterns — lemmas, SMTPat, induction, GADT type-refinement barriers, mutual rec, Ghost/effectful bridging, Z3 5.3.0 diagnostics, and common proof errors.
 ---
 
 # F\* Proof Patterns
 
-> **Version:** pinned to F\* ≤ 2025.12.15 (Low*/KaRaMeL era).
-> For ≥ v2026.09.20 (Custard/Pulse, `krml`/Low* removed), see
-> [`fstar-2026.09.20`](../fstar-2026.09.20/SKILL.md).
+> **Toolchain:** F\* latest — Custard/Pulse, Z3 5.3.0, no KaRaMeL/Low\*.
 > Cross-reference: [fstar index](../SKILL.md).
 
 ---
@@ -122,40 +120,60 @@ let wfcv_prop (v: a) : prop = v == x
 
 ---
 
-## 7. Ghost/Stack Bridge (Error 53)
+## 7. Ghost/effectful bridge (Error 53)
 
-Calling a Lemma (Ghost) from Stack with `HST.get()` values triggers Error 53.
+**Error 53** comes from trying to compute a `Ghost`/`GTot` value inside an
+effectful body and pass it to a `Lemma` as if it were an ordinary one: the
+ghost effect is not a sub-effect of the pure/effectful one it is used from.
 
-**Fix**: pass the heap to the lemma as a parameter:
+**Fix**: make the fact a **parameter of the lemma**, so the caller passes the
+value in and the lemma only *states* over it:
+
 ```fstar
-let lemma_bridge (buf: buffer byte) (h: HS.mem) : Lemma
-  (requires ...) (ensures ...) = ()
+let lemma_bridge (buf: buffer byte) (s: Seq.seq byte) : Lemma
+  (requires ... s == spec ...) (ensures ...) = ()
 
-(* At call site — capture h0 at function START *)
-let h0_snap = HST.get () in
-lemma_bridge buf h0_snap;  (* OK *)
+(* at the call site *)
+let s0 = view buf in            (* the view is a pure expression — no capture *)
+lemma_bridge buf s0             (* OK: the fact travels as an argument *)
 ```
 
-`HST.get()` at START gives `h_init == h0` from Hoare pre-condition. At END it's a fresh SMT variable not unified with `h1`. Never compute `Seq.slice` in Stack and pass to Lemma.
+The general shape is the same as Pulse's `pts_to` view: the state is not
+*captured* mid-body (there is no heap snapshot to re-read), it is a **pure
+value threaded as an argument**.  Never compute a `Seq.slice` from inside the
+effectful body and hand it to a pure lemma as if it were connected to the
+post-state — pass it in.
 
-### Pure-spec bridge (eliminating recursive Stack)
+### Pure-spec bridge (eliminating recursive effectful decoders)
 
-Recursive Stack decode functions create fresh heap variables per recursive call — SMT cannot equate these to outer `h1`. **Fix**: eliminate ALL recursive Stack calls. Pipeline: `Stack read → lemma bridge → pure spec → convert result`.
+A recursive decoder in an effectful language creates a fresh state view per
+recursive call, and SMT cannot equate those with the outer post-state.
+**Fix**: eliminate the recursion from the effectful layer.  Pipeline:
+`effectful read → lemma bridge → pure spec → convert result`.
 
-### Stack encode→decode roundtrip (post-condition chaining)
+### Encode→decode roundtrip (post-condition chaining)
 
-SMT cannot chain: `encode` Stack post-condition → pure roundtrip lemma → `decode` Stack post-condition.  The encode post-condition describes a buffer slice; the decode post-condition references individual buffer indices.  SMT cannot connect the slice equality to the index lookups through a pure lemma call.
+SMT cannot chain: `encode` post-condition → pure roundtrip lemma → `decode`
+post-condition, when both post-conditions are about buffers.  The encode
+post-condition describes a slice; the decode post-condition references
+individual buffer indices.  SMT cannot connect the slice equality to the index
+lookups through a pure lemma call.
 
-**Fix**: write structural roundtrip lemmas that inline the encode logic (direct buffer writes) and call the pure roundtrip lemma directly.  Do NOT call the encode/decode Stack functions and attempt post-condition chaining.  The individual functions remain verified via their own post-conditions; the structural lemma proves the roundtrip property without SMT bridge gaps.
+**Fix**: write structural roundtrip lemmas that inline the encode logic (the
+explicit buffer writes) and call the pure roundtrip lemma directly.  Do NOT
+call the encode/decode implementations and attempt post-condition chaining.
+The individual functions remain verified via their own post-conditions; the
+structural lemma proves the roundtrip property without an SMT bridge gap.
 
 ### Buffer slice to index bridging
 
-SMT cannot connect `Seq.slice (as_seq h buf) off (off+n) == expected`
-to `LB.index buf off == expected_0`.  Slice equality does not automatically
-imply element-wise equality over `LB.index` — the SMT sees `as_seq` as an
-uninterpreted function in the Stack effect context.
+SMT cannot connect `Seq.slice s off (off+n) == expected` to `b.(off) ==
+expected_0`.  Slice equality does not automatically imply element-wise equality
+over the buffer's index view — the read view is an uninterpreted function when
+it appears outside the separation-logic context.
 
-**Fix**: Write a pure `Lemma` (not Stack) parameterized by the heap:
+**Fix**: write a pure `Lemma` over the **view** `s`, parameterized by the
+values (not by the state):
 
 ```fstar
 let lemma_slice_index_match (w: wire_addr) (s: Seq.seq U8.t) (off: nat) : Lemma
@@ -173,17 +191,18 @@ let lemma_slice_index_match (w: wire_addr) (s: Seq.seq U8.t) (off: nat) : Lemma
     Seq.lemma_index_slice s off (off + 4) 3;
     ()
 
-let lemma_decode_match (w: wire_addr) (buf: LB.buffer U8.t) (off len: U32.t) (h0: HS.mem)
-  : Lemma (requires ... slice == encode_spec ...) (ensures True)
-  = lemma_slice_index_match w (LB.as_seq h0 buf) (U32.v off)
+let lemma_decode_match (w: wire_addr) (s: Seq.seq U8.t) (off len: U32.t)
+  : Lemma (requires ... Seq.slice s ... == encode_spec ...) (ensures True)
+  = lemma_slice_index_match w s (U32.v off)
 ```
 
 Key points:
 - `Lemma` (Ghost) CAN call `Seq.lemma_index_slice` (also Ghost) — no barrier
-- The lemma takes `h0` as explicit parameter, not captured via `HST.get()`
-- Callers in Stack context use `lemma_decode_match w buf off len (HST.get ())`
-- `Seq.index (as_seq h buf) off` is definitionally equal to `LB.index buf off`
-  in heap `h`, so the lemma's post-condition connects to buffer reads
+- The lemma takes the **view** as an explicit parameter; it does not capture state
+- The caller supplies the view (`pts_to` in Pulse), so the post-condition
+  connects to the buffer reads
+- `Seq.index s off` is definitionally the element the buffer read returns when
+  `pts_to b s` holds, so the lemma's post-condition connects to buffer reads
 - Pattern works for any fixed-size structure: just extend the lemma for more indices
 
 ---
@@ -358,12 +377,12 @@ works directly.
 | 19 (subtyping) | GADT type index mismatch | `assert (a == T); let v_T : T = v; lemma(v_T)` |
 | 19 (#a binder) | Unnamed existential type parameter | `Count #a_elem n c'` — name the binder |
 | 19 (int/nat) | `nat - nat` returns `int` | `if a >= b then a - b else 0` |
-| 53 (Ghost/Stack) | Computing Ghost in Stack, passing to Lemma | Pass HEAP to lemma instead |
-| 56 (bound variable) | `FStar.Int.Cast` refined return in Stack | Wrap in `inline_for_extraction Tot` helper |
+| 53 (Ghost/effectful) | Computing Ghost in an effectful body, passing it to a Lemma | Pass the state view to the lemma as an argument (§7) |
+| 56 (bound variable) | `FStar.Int.Cast` refined return used in an effectful body | Wrap in `inline_for_extraction Tot` helper |
 | 66 (implicit) | GADT + Type0-valued return function | Explicit `#a1 #a2` on `fst`/`snd` |
 | 72 (identifier not found) | Forward reference in `#push-options` block | Move definition before call site; `val` declarations don't always help in `.fst` files with nested push-options |
 | 168 (nested push) | `#push-options` inside match branch | Extract to separate lemma function |
-| 189 (C.Loops) | Wrong `while` API | See fstar-lowstar § C.Loops |
+| 189 (loop API) | Wrong `while`/`for` API | See [fstar-lang §15](../fstar-lang/SKILL.md) for `decreases`/`else`-branch shape; Pulse loop syntax is in [fstar-build §15](../fstar-build/SKILL.md) |
 | 189 (Seq.length on list) | `open FStar.Seq` shadows `List.Tot.length` — `length (r: list byte)` resolves to `Seq.length` which expects `seq` | Use `List.Tot.length` or `L.length` explicitly; never bare `length` on `list` refinements when `FStar.Seq` is opened |
 | 242 (local rec) | Local `let rec` not SMT-encoded | Use top-level `let rec` or `List.Tot.fold_right` |
 | 297 (or-pattern) | Different type bindings in GADT or-pattern | Split into separate cases |
@@ -374,7 +393,7 @@ works directly.
 
 - `else` of `if i < n` gives `~(i < n)`, NOT `i >= n`. Use positive condition: `if i >= n then ... else ...`
 - `nat - nat` returns `int`. Guard with `if a >= b`.
-- `*` without `open FStar.Mul` is a TUPLE TYPE operator. Open `FStar.Mul` for multiplication.
+- `a * b` IS multiplication, with no `open` (`FStar.Mul` no longer exists). A pair type is `a & b`.
 - `decreases` must be on the SAME LINE as the return type for 3+ parameter functions.
 - Pure effect name: a constructor named `Pure` shadows `Prims.Pure`. Use `Tot` or fully-qualified `Prims.Pure`.
 - `Seq.equal` in ensures: SMT doesn't substitute. Use `==` with `lemma_eq_elim` in the body.
@@ -776,7 +795,7 @@ For 16-element structures:
     (ensures (forall (i: nat). i < n ==> Seq.index s (off + i) == List.Tot.index expected i))
     (decreases n)
   ```
-- SMT cannot chain 16 `LB.upd` Stack post-conditions.  Group writes into
+- SMT cannot chain 16 element-wise buffer-update post-conditions.  Group writes into
   4×4 chunks with an intermediate lemma, reusing the proven 4-byte
   pattern from a smaller corresponding lemma.
 
@@ -805,7 +824,7 @@ checks when constructing the record from `int` values.
 
 ### Pulse `fn` `ensures` for a fixed-16-byte struct — POINTWISE, not `seq_of_list`
 
-**Verified lesson (fstar-uuid, v2026.09.20 Custard/Pulse).**  The §11 "~12-layer"
+**Verified lesson (fstar-uuid, Custard/Pulse).**  The §11 "~12-layer"
 Seq-unwind limit bites TWO ways in a `#lang-pulse` `fn` that reads/writes a fixed
 16-byte record (e.g. an RFC 9562 UUID):
 
@@ -1083,21 +1102,21 @@ cascade through each individual binding.
 
 ## 22. Integration Test Bridge Lemma Bindings
 
-**Lesson**: When binding Low* bridge lemmas in integration
-tests, do NOT add explicit type annotations with weaker pre/post-conditions.
-The annotated type will fail subtyping against the lemma's actual Stack type
-(Error 19: refinement mismatch on requires/ensures clauses).
+**Lesson**: When binding bridge lemmas in integration tests, do NOT add
+explicit type annotations with weaker pre/post-conditions.  The annotated type
+will fail subtyping against the lemma's actual type (Error 19: refinement
+mismatch on requires/ensures clauses).
 
 ### The problem
 
 ```fstar
 (* WRONG — typed annotation fails subtyping *)
 let _test_low_encode_match_type
-  : sm_state -> LB.buffer U8.t -> U32.t
-  -> Stack unit (requires fun h0 -> True) (ensures fun h0 _ h1 -> True)
+  : sm_state -> Seq.seq U8.t -> U32.t
+  -> Lemma (requires True) (ensures True)
   = Foo.Low.lemma_encode_match
 (* Error 19: refinement mismatch — the lemma's actual type has
-   requires live h0 buf /\ offset < length buf *)
+   requires len s >= offset + 4 /\ ... *)
 ```
 
 ### The fix: admit SMT + untyped value binding
@@ -1114,14 +1133,14 @@ Let F* infer the full type (with all requires/ensures).  Admit the SMT
 queries at the test boundary — the lemma is already proven in its defining
 module; the integration test just needs to confirm the symbol exists.
 
-The same pattern applies to any lemma with non-trivial requires clauses
-that reference heap-dependent predicates at the integration test boundary
-where no real buffer is available.
+The same pattern applies to any lemma with non-trivial requires clauses that
+reference a state view at the integration-test boundary, where no real buffer
+is available.
 
 ### Also required
 
-Add `module U8/U32/LB` aliases and `open FStar.HyperStack.ST` in the
-integration test module so the inferred Stack types resolve correctly.
+Add `module U8/U32` aliases in the integration test module so the inferred
+types resolve correctly.
 
 ---
 
@@ -1169,7 +1188,7 @@ the error propagates through the normal decode result path.
 
 - F* codecs are total functions (`Tot`, not `Exn`)
 - `fail_` is a reserved keyword in F* (see fstar-lang §11)
-- Exceptions break extraction to C/OCaml/WASM
+- Exceptions break extraction to C/OCaml
 - The `reject` pattern is compositional — it works inside `bind`, `product`,
   `sum`, and any other combinator that calls `.dec` on a sub-codec
 
@@ -1220,16 +1239,16 @@ equivalent to `let _ = ()`.  It should never appear in production code.
 
 ### When `ensures True` IS acceptable
 
-Per fstar-proofs §7 (Ghost/Stack Bridge), `ensures True` bridge lemmas
-are acceptable ONLY when:
+Per §7 (Ghost/effectful bridge), `ensures True` bridge lemmas are
+acceptable ONLY when:
 1. The requires clause carries a substantive proof burden that SMT
-   must discharge at the call site (e.g., `requires B.live h buf /\
-   U32.v off + 16 <= B.length buf`), AND
+   must discharge at the call site (e.g., `requires U32.v off + 16 <=
+   Seq.length (view buf)`), AND
 2. The lemma body calls other lemmas that chain through the requires
    to establish invariants for subsequent code.
 
 The bridge lemma pattern is: the requires encodes what the caller must
-prove; the `ensures True` acknowledges that the Stack effect prevents
+prove; the `ensures True` acknowledges that the effectful layer prevents
 SMT from expressing the real postcondition.  The real property is
 tested at runtime.  But these lemmas should STILL have nontrivial
 requires — never `requires True`.
@@ -1264,7 +1283,7 @@ When reviewing F* code, flag every `Lemma (ensures True)` or
 `Lemma (True)`:
 - If `requires` is `True` or trivial AND the file is in `src/` → REMOVE
   (it proves nothing; if documenting intent, move to docs/ as spec skeleton).
-- If `requires` is nontrivial and the lemma bridges Stack/Heap → KEEP
+- If `requires` is nontrivial and the lemma bridges an effectful state view → KEEP
   but document the bridge pattern.
 - If the file header says "NOT IN BUILD PATH" or "specification skeleton"
   → KEEP (it's aspirational documentation, not code).
@@ -1778,44 +1797,30 @@ because the bodies were never checked.
 
 ---
 
-## 35. `open FStar.Mul` Is Required for Multiplication — Cache-Masked Bug
+## 35. There is no multiplication idiom to remember — `*` just multiplies
 
-**Critical lesson**: In F\*, `*` defaults to the **tuple type
-operator** (see fstar-lang §4).  For multiplication, you MUST `open FStar.Mul`
-explicitly.  `open FStar.Mul` from an imported module is NOT transitive —
-`open Some.Types` does NOT make `*` multiply in your module.
+**`a * b` IS multiplication in F\* latest**, on `int`, `nat`, and the refined
+integer types, with **no `open`** of any kind.  The module `FStar.Mul` no
+longer exists, so `open FStar.Mul` is a hard `Error 134` (§98).  The old
+"is it the tuple operator?" question is gone; a pair type is written `a & b`.
 
-### The masked-bug mechanism
+What survives from the old cache-masked bug is the **caching lesson**, which
+generalises to every name-resolution question:
+
+### The masked-bug mechanism (why a cache can hide a scoping error)
 
 When building with `--cache_checked_modules`, F* loads `.checked` files for
-transitive dependencies.  If a dependency module opens `FStar.Mul` and is loaded
-from its `.checked` file, the cached environment carries the multiplication
-interpretation of `*`.  This transitively infects modules that `open` it
-even though `open` is not supposed to be transitive.  The result: `hi * 256 + lo`
-works with a cached build but fails with a from-source check (which resolves
-from source, not cache).
-
-### Detection
-
-```bash
-# Find modules using * for multiplication without open FStar.Mul
-grep -l '\* 256\|Prims.op_Multiply' src/*.fst | while read f; do
-  grep -q 'open FStar.Mul' "$f" || echo "$f: MISSING open FStar.Mul"
-done
-```
-
-### Fix
-
-```fstar
-open FStar.Mul  (* REQUIRED — * is tuple type without this *)
-```
+transitive dependencies.  Their *environment* comes with them — including
+whatever that dependency opened — so a module can typecheck against a
+cache that a from-source check rejects.  The result: a green cached build,
+a red from-source check, and no obvious culprit.
 
 ### Prevention
 
-- Every module using `*` for multiplication MUST have `open FStar.Mul`
 - CI: run a from-source check on every module (no cache masks)
 - Run a full build with `--cache_off` periodically to flush transitive cache bugs
-- Grep for `* <number>` in new code and verify `FStar.Mul` is opened
+- When a symbol "exists" but should not, check whether an *opened* dependency
+  is what supplies it
 
 ---
 
@@ -1868,11 +1873,11 @@ for m in re.finditer(r'\(\*\*(.*?)\*\)', text, re.DOTALL):
 
 ---
 
-## 37. `;` Before `#pop-options` in Stack Functions — Syntax Error
+## 37. `;` Before `#pop-options` in an Effectful Function — Syntax Error
 
 **Critical lesson**: In F*, `;` is the sequencing operator.
 `e1; e2` means "evaluate e1, then e2".  The parser expects an expression
-after `;`.  When the last expression in a Stack function body ends with
+after `;`.  When the last expression in an effectful function body ends with
 `;` and the next token is `#pop-options`, the parser sees
 `expr; #pop-options` which is a syntax error — `#pop-options` is a
 directive, not an expression.
@@ -1882,14 +1887,14 @@ directive, not an expression.
 ```fstar
 (* BROKEN — trailing semicolon before #pop-options *)
 #push-options "--z3rlimit 20"
-let my_function ... : Stack unit ... =
+let my_function ... : Tot unit ... =
   ... body steps ...;
   last_step arg1 arg2;
 #pop-options
 
 (* FIXED — remove trailing semicolon *)
 #push-options "--z3rlimit 20"
-let my_function ... : Stack unit ... =
+let my_function ... : Tot unit ... =
   ... body steps ...;
   last_step arg1 arg2
 #pop-options
@@ -1916,27 +1921,26 @@ LSP-based checks always catch it.
 
 ---
 
-## 38. `if-then` Without `else` in `C.Loops.for` Callback Bodies
+## 38. `if-then` Without `else` as a Whole `unit`-Returning Body
 
-**Critical lesson**: A `C.Loops.for` loop body is a function
-`Stack unit (requires ...) (ensures ...)`.  When the ENTIRE body is a bare
-`if cond then expr` without `else`, F* reports Error 168 because the
-function return type `Stack unit` requires both branches to produce `unit`.
+**Critical lesson**: A loop callback that returns `unit` (in Pulse, the body
+of a `for`/`while` `fn`; in older code a `C.Loops.for` callback) is a function
+with a `unit` return type.  When the ENTIRE body is a bare `if cond then expr`
+without `else`, F* reports Error 168 because `unit` requires both branches to
+produce `unit`.
 
 ### The pattern
 
 ```fstar
 (* BROKEN — if-then without else is the entire function body *)
 let body_loop (i: U32.t {0 <= U32.v i \/\ U32.v i < 32})
-  : Stack unit (requires fun h -> inv h (U32.v i))
-               (ensures fun _ _ h1 -> inv h1 (U32.v i + 1))
+  : Tot unit
   = if not (U8.eq (B.index buf i) (B.index expected i)) then
       B.upd result 0ul 0uy
 
 (* FIXED — add else () *)
 let body_loop (i: U32.t {0 <= U32.v i \/\ U32.v i < 32})
-  : Stack unit (requires fun h -> inv h (U32.v i))
-               (ensures fun _ _ h1 -> inv h1 (U32.v i + 1))
+  : Tot unit
   = if not (U8.eq (B.index buf i) (B.index expected i)) then
       B.upd result 0ul 0uy
     else ()
@@ -1964,11 +1968,10 @@ let computed_key = B.alloca 0uy 32ul in
 ### Detection
 
 Grep for `= if .* then .*\n  in` or `= if .* then .*$` (without `else`
-or trailing `;`) in Stack function bodies that are loop callbacks.
+or trailing `;`) in `unit`-returning bodies that are loop callbacks.
 
-The 7 instances found in `Test.Integration.fst` were all `C.Loops.for`
-callback bodies that did byte-by-byte comparison and set a result flag on
-mismatch.
+The 7 instances found in `Test.Integration.fst` were all loop callback bodies
+that did byte-by-byte comparison and set a result flag on mismatch.
 
 ---
 
@@ -2031,7 +2034,7 @@ Counting code sites requires pattern disambiguation.
 
 ```bash
 # admit() code sites — matches the actual escape-hatch call
-grep -c '= admit()\|push_frame(); admit()' Module.fst
+grep -c '= admit()\|admit ()\s*$' Module.fst
 
 # admit_smt_queries regions — count the #push-options lines (not the prose)
 grep -c '#push-options .*admit_smt_queries true' Module.fst
@@ -2039,9 +2042,13 @@ grep -c '#push-options .*admit_smt_queries true' Module.fst
 
 The three admit() forms to catch:
 1. `= admit();` — function body is just the escape hatch
-2. `= push_frame(); admit();` — FFI-style wrapper
+2. `= admit ();` — same call, with a space before the unit argument (so a
+   pattern for `admit()` alone misses it)
 3. bare `admit();` (indented) — mid-function escape hatch, often at the
    top of a `(* ... *)` block that ends right before the call
+
+Pulse spells it `fn f … { admit () }`, so a `^let`-anchored pattern misses
+every one of them — count `admit` **un-anchored**, then classify.
 
 ### The audit procedure
 
@@ -2226,10 +2233,11 @@ interim).
 
 ### Known F* gotchas hit while building these
 
-- **`open FStar.Mul` is required** for `% 256` / `pow2 8 = 256` normalization.
-  Without it, `UInt8.uint_to_t (int_of_char c % 256)` fails with
-  `Error 19: expected uint_t UInt8.n (= byte) got nat` (cache-masked variant of
-  §35 — `pow2` unfolds via `*`, which is the tuple operator without `FStar.Mul`).
+- **`%`/`pow2` normalization works out of the box** — `a * b` is multiplication
+  with no `open` (§35, §98).  A residual
+  `Error 19: expected uint_t UInt8.n (= byte) got nat` on
+  `UInt8.uint_to_t (int_of_char c % 256)` is then a *refinement* problem, not an
+  operator one: give the `%` a bound (`0 <= … /\ … < 256`) before `uint_to_t`.
 
 - **Name collision**: `Codec.Types.string_to_bytes : string -> byte_seq`
   collides with a downstream `Text.Codec.string_to_bytes : string -> list byte`.
@@ -4462,17 +4470,18 @@ enforce is silently unenforced, or (b) the code was written for a scope that was
 then cut without being deleted.  Each must be wired + proven, or deleted +
 documented; never left orphaned.
 
-## 68. A Package Can Be 0-Admit + build-GREEN Yet Have Unproven "Proven" Capacity — Audit the `.Low` Orphans and the Tautological Roundtrip
+## 68. A Package Can Be 0-Admit + build-GREEN Yet Have Unproven "Proven" Capacity — Audit the Orphaned Effectful Modules and the Tautological Roundtrip
 
 **Skeptical-review lesson**: A package can
-verify 0-admit and extract cleanly while its Low\* layer proves NOTHING about
-invertibility.  Two distinct failure modes, both invisible to the full-build
+verify 0-admit and extract cleanly while its effectful (Pulse/`.Low`) layer
+proves NOTHING about invertibility.  Two distinct failure modes, both invisible to the full-build
 gate:
 
-### (a) Orphaned `.Low` modules — verified+extracted, wired into nothing
+### (a) Orphaned effectful modules — verified+extracted, wired into nothing
 
-`grep` for who `open`s/`include`s each `.Low` module and who binds
-its lemmas in the Integration test:
+`grep` for who `open`s/`include`s each effectful module (the convention in the
+reference packages is a `.Low`/`Pulse` suffix — substitute your own module set)
+and who binds its lemmas in the Integration test:
 
 ```bash
 # Is any module actually USING the Low layer?
@@ -4520,7 +4529,7 @@ The same skeptical pass confirms a key discipline:
 `wfcv_prop = True` at a `custom` site is FINE **only** when the non-vacuous
 roundtrip lemma's `requires` forces the real `wfcv` gate.  A `= True` field
 with NO such roundtrip lemma (i.e. the `custom` is wired to nothing) is the §24
-anti-pattern in Low\* clothing.
+anti-pattern wearing an extraction-shaped costume.
 
 ### When to apply
 
@@ -4720,7 +4729,7 @@ depends on input byte `i - bpp` (and the prior row).  Their roundtrip
    `sub_mod x p` and every reconstruct byte `add_mod f p` for the SAME predictor
    `p` — so the roundtrip is *just* `add_mod (sub_mod x p) p == x`, independent
    of `p`.  On the new toolchain this is `FStar.UInt.lemma_add_sub_cancel #8 (v x) (v p)`
-   + `v_inj` (see fstar-2026.09.20 §8 "Wrapping byte arithmetic roundtrip").
+   + `v_inj` (see [fstar-stdlib §15](../fstar-stdlib/SKILL.md) "Wrapping byte arithmetic roundtrip").
    The predictor function (`avg_predictor`/`paeth_predictor`) needs NO arithmetic
    lemma — its inputs match by #2, so its output matches by congruence.
 
@@ -5247,7 +5256,7 @@ let select_best_mask (m: qr_matrix) : (r:nat{0 <= r /\ r <= 7}) =
   `best_mid := mid` satisfies the `best_mid <= 7` refinement; `mid + 1` stays `<= 8`.
 - `best_mid : nat{best_mid <= 7}` — the value returned is always in range.
 - The body's `decreases (8 - mid)` stays well-founded (bare `8 - mid`, an
-  application-minus-var, parses fine — fstar-2026.09.20 §8).
+  application-minus-var, parses fine — [fstar-lang §8](../fstar-lang/SKILL.md)).
 
 When the "impossible" refinement is actually a `match`/`if`-terminator fact,
 make the *parameter* carry the bound instead of asking SMT to track it through
@@ -5727,7 +5736,7 @@ BIT-LINEAR map, not a descending case-fold.
   `lemma_subst_hi_zero` + `lemma_reduce_sub_id` (reduce_sub c = c for c < 256).
 
 **KEY GOTCHAS (each cost real time, do NOT re-derive):**
-1. **`M` (single uppercase) and `by` are RESERVED identifiers in F* v2026.09.20.**
+1. **`M` (single uppercase) and `by` are RESERVED identifiers in F*.**
    `(x y k M: nat)` → syntax error; `let by = ...` → syntax error (tactic `by`).
    Use `cst`/`bxv`/`byv`. (Uppercase single letters are effect/meta identifiers.)
 2. **`FStar.Math.Lemmas.pow2` is `Prims.pow2`, a THIRD power-of-2** distinct from
@@ -5982,7 +5991,7 @@ guard through `rev`) + `append_l_nil` (to drop `rev run @ []`).
   recipe is the INTERNAL mechanism of a delimiter `codec`'s `.dec` (§60/§60b) —
   NOT a consumer-package scanner (Mandate 22).
 - Concrete *multi-label* vectors (e.g. `example.com`, 11 bytes) still won't
-  SMT-unfold; use `assert_norm` on the closed byte list (fstar-2026.09.20 §7),
+  SMT-unfold; use `assert_norm` on the closed byte list ([fstar-lang §12](../fstar-lang/SKILL.md)),
   NOT a general induction over the label list.
 
 ## 85. `sep_by1` (variable-length separator interleave) — TWO walls, and neither is a dodge
@@ -6605,7 +6614,7 @@ leaves `wfcv_ xs` **opaque** to the solver: the context shows `wfcv_ xs = true`
 and the goal needs `for_all f0 xs`, and nothing connects them. The identical
 experiment with the guard **inlined** behaves differently.
 
-This is the same root cause as §7 of `fstar-2026.09.20` (`assert_norm` does not
+This is the same root cause as [fstar-lang §12](../fstar-lang/SKILL.md) (`assert_norm` does not
 reduce `let`-bound variables): a `let` binding is a free variable whose definition
 is not substituted into the redex.
 
@@ -7143,40 +7152,41 @@ arithmetic, suspect a missing characterisation lemma (§89's spirit).
 
 ---
 
-## 98. `FStar.Mul` does not exist in F\* >= v2026.09.20 — and the LSP tool will not tell you
+## 98. `FStar.Mul` does not exist — `*` is multiplication, and the LSP tool will not tell you
 
-Verified 2026-11-07.  In F\* <= 2025.12.15, `open FStar.Mul` is how you make
-`*` multiply (§35, §4 of `fstar-lang`).  In **F\* >= v2026.09.20** the module is
-**gone**: the ulib has `FStar.Math`, `FStar.Math.Lemmas`, `FStar.Int`, … and no
-`FStar.Mul`.
+Verified 2026-11-07, and still true on F\* latest.  The module `FStar.Mul` is
+**gone** from the ulib — the namespace has `FStar.Math`, `FStar.Math.Lemmas`,
+`FStar.Int`, … and no `FStar.Mul`.  `a * b` on `int`/`nat` **is multiplication**
+with no `open` at all (§35).
 
 ```
 * Error 134: Namespace 'FStar.Mul' cannot be found.
 * Warning 285: No modules in namespace FStar.Mul and no file with that name either
 ```
 
-**The fix is `open FStar.Math.Lemmas`** — and the reason is subtler than
-"the module moved".
+So the fix for old code is to **delete the `open FStar.Mul`** — not to
+substitute `open FStar.Math.Lemmas`.  (The old "use `FStar.Math.Lemmas`"
+advice came from a build where the `open` was load-bearing; it is not
+any more, and keeping it is cargo-cult.)
 
-`open FStar.Math.Lemmas` brings `op_Multiply` into scope *as a usable infix
-`*` for `int`*.  Concretely, tested with the real `fstar.exe` on
-v2026.09.20:
+### What the two tools actually measure today
 
-| you write | result |
+`fstar.exe` on F\* latest, six-line module declaring `2 * f (n - 1)`:
+
+| you write | `fstar.exe` |
 |---|---|
-| `open FStar.Mul` | `Error 134: Namespace 'FStar.Mul' cannot be found` |
-| `open FStar.Math.Lemmas` + `2 * pow2 (n - 1)` | **works** |
-| no `open` + `2 * pow2 (n - 1)` | `Error 189: Expected expression of type Type got 2` |
+| `open FStar.Mul` | **`Error 134`** |
+| no `open` | **green** — `*` is multiplication |
+| `open FStar.Math.Lemmas` | green (harmless, but not needed for `*`) |
 | `Prims.op_Multiply a b` | `Error 72: Identifier not found: op_Multiply` |
 
-So in >= v2026.09.20 the `open` is **still required**, exactly as in <=
-2025.12.15 — only the module's NAME changed (`FStar.Mul` -> `FStar.Math.Lemmas`).
-`op_Multiply` is not a name you can refer to directly; it is what the `open`
-makes `*` mean.
+**A `Prims.op_Multiply` in old source is dead** — `op_Multiply` is not a name
+you can refer to; it was only ever what an `open` made `*` mean.
 
-### ⚠⚠ The LSP tool and `fstar.exe` DISAGREE about this idiom — in BOTH directions
+### ⚠⚠ The LSP tool and `fstar.exe` have DISAGREED about this construct — in BOTH directions
 
-Measured 2026-11-07 on the *same* 6-line module:
+Measured 2026-11-07 on the *same* 6-line module, on a build where the `open`
+was still load-bearing:
 
 | idiom | `fstar_check` (LSP) | `fstar.exe` (runner) |
 |---|---|---|
@@ -7185,10 +7195,11 @@ Measured 2026-11-07 on the *same* 6-line module:
 | `open FStar.Math.Lemmas` + `2 * f (n-1)` | **`Error 189`** (false negative!) | **green** |
 | `Prims.op_Multiply` | green | `Error 72` |
 
-Read that third row again: the **correct** code is the one the LSP tool
-**rejects**, and the incorrect code is what it **accepts**.  So neither tool is
-a reliable oracle for this construct, and "it's green in the LSP" means
-nothing here either way.
+Read that third row again: the **correct** code was the one the LSP tool
+**rejected**, and the incorrect code was what it **accepted**.  The runner
+column is what F\* latest now says (no `open`); the point of the table is the
+**disagreement pattern**, not any one row — neither tool was a reliable oracle
+for this construct, and "it's green in the LSP" means nothing here either way.
 
 **Escalating cost, measured this session:** two modules were "verified" by
 `fstar_check`, committed, and only failed when the runner swept the suite —
@@ -7572,7 +7583,7 @@ let test (xs: list byte) : Lemma
 `FStar.Classical.forall_intro (#a) (#p) ($_: x:a -> Lemma (p x)) : Lemma
 (forall x. p x)` has nowhere to put a hypothesis: the lambda is
 `x:a -> Lemma (p x)`, and any `requires` on `lemma_per` must be discharged
-**inside** it from the enclosing context. In F\* v2026.09.20 that does not
+**inside** it from the enclosing context. In F\* latest that does not
 happen — the failure is a plain `Error 19`, not an unresolved implicit, so it
 reads like a proof failure.
 
@@ -8579,3 +8590,74 @@ premise; `1 ≠ 5`).
 > **A premise that looks like the caller's is not necessarily the decoder's.**
 > Read the `if`s in the function body and mirror *those*, not the caller's
 > comment about them.
+
+## 116. Z3 5.3.x silently stops deriving facts 4.13.3 gave for free — and misreports it as a timeout
+
+Verified 2026-11-16 on F* latest (Z3 5.3.0), moving `fstar`, `fstar-image`, and
+`fstar-codec` from Z3 4.13.3 to Z3 5.3.0 (F* made it the default in
+`v2026.10.25`).  Four proofs that had been green for months broke.  All four
+were **toolchain** failures, not statement errors, and all four were fixed by
+naming the missing fact — none by raising a limit.
+
+### The failure mode, and why it misleads
+
+Z3 5.3.x is markedly more conservative about quantifier instantiation and
+nonlinear arithmetic.  A goal that 4.13.3 closed by *finding* the instantiation
+now comes back `unknown`, and F* renders that as:
+
+- `Failed to prove: <goal>` with no further detail, or
+- **`The SMT query timed out, you might want to increase the rlimit`**
+
+The second message is **routinely false**.  Two measured disproofs:
+
+| case | what "increase the rlimit" did |
+|---|---|
+| `Pulse.Lib.PriorityQueue` `sift_down` | `--z3rlimit_factor 4 → 16`: identical failure, identical goal |
+| `Data.Image.QRCode.GF256` `lemma_reduce_step_xor` | `--z3rlimit 240 → 1200`: **hung** (Z3 100 % CPU, 25+ min), never passed |
+
+So: **do not treat "timed out" as evidence about budget.**
+
+### The four measured diagnostics, in order of cost
+
+1. **Is it the sub-lemma or the composition?**  Capture with `--log_queries`,
+   then read the `@query` blocks.  In the GF256 case the sub-lemma
+   (`lemma_select_xor_bool`) was `unsat` while the *goal that is exactly its
+   instantiation* was `unknown` — which located the problem at the call site,
+   not in the lemma.
+2. **Replay the query ALONE.**  Extract the failing `@query` and hand it to
+   `z3 -smt2`.  GF256's failed goal was `unsat` standalone and `unknown`
+   in-script.  **That difference is the finding**: the fact is provable but
+   unrecoverable amid the accumulated context.  (Do not "fix" isolate-replay —
+   a query that only passes alone is not proved.)
+3. **Check the solver version is even the lever.**  Replayed the same F* script
+   under 5.3.0 and 5.3.3: `367 unsat / 13 unknown` vs `368 / 12`.  Upgrading Z3
+   did **not** close it.  Measure this before proposing a solver bump.
+4. **Only then** look at the statement.
+
+### The fixes that worked (all "name the missing fact")
+
+- **`FStar.Int.ones_to_vec_lemma = ()`**: `Z3` would not discover that
+  `to_vec (ones n)` reduces to `UInt.to_vec (UInt.ones n)` before the
+  `[SMTPat]` on the UInt lemma could fire.  Fixed by asserting the bridge
+  explicitly, then calling the UInt lemma.
+- **`SizeT.add`/`mul` opacity**: their results are *Pure refinements*, not
+  lemmas with `SMTPat`, so `v left = 2 * v idx + 1` is consumed where `left`
+  is bound and cannot be re-derived later.  Fixed by asserting the equation
+  **next to the binding** (upstream later shipped the same fix).
+- **A recursive `% 65521` bound**: the step needed
+  `(s2 + s1') % 65521 < 65521`, a nonlinear fact it spun on.  Fixed by
+  asserting the two `%` bounds per step — 36 min hang → under 3 min.
+
+### Rule
+
+> On a Z3 bump, a proof that fails with `Failed to prove` or a `rlimit`
+> message is **presumed a lost instantiation, not a lost budget**.  Locate the
+> fact Z3 no longer finds and state it explicitly.  A higher rlimit will
+> either change nothing or hang.
+
+### Corollary: a fix that works on one solver version is a fix to keep
+
+The `ulib` bridge assert and the `SizeT` binding asserts are plain `assert`s of
+true equations — they cost nothing under 4.13.3 and they are what makes the
+proofs survive 5.3.x.  Prefer that shape over any `--z3rlimit` bump: limits are
+solver-specific tuning, asserts are statements.

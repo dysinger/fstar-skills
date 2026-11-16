@@ -5,9 +5,7 @@ description: F* standard library — Seq, List, Map, Set, Option, Classical, Squ
 
 # F\* Standard Library
 
-> **Version:** pinned to F\* ≤ 2025.12.15 (Low*/KaRaMeL era).
-> For ≥ v2026.09.20 (Custard/Pulse, `krml`/Low* removed), see
-> [`fstar-2026.09.20`](../fstar-2026.09.20/SKILL.md).
+> **Toolchain:** F\* latest — Custard/Pulse, Z3 5.3.0, no KaRaMeL/Low\*.
 > Extracted from the full F* skill.  Cross-reference: [fstar index](../SKILL.md).
 
 ---
@@ -373,3 +371,96 @@ not a missing lemma.
   `Seq.lemma_eq_elim` it against `append (create 1 h) (seq_of_list t)` when you
   need to see inside.  `FStar.Seq.Properties.lemma_seq_of_list_index` gives the
   index law (`index (seq_of_list l) i == List.Tot.index l i`, with `SMTPat`).
+
+---
+
+## 12. `FStar.List.Tot` has **no** `take`/`drop` — define them (transparent, structural)
+
+`FStar.List.Tot.Base` exports `nth`/`index`/`rev`/`append`/`mapi`/`fold_left`
+etc., but **not** `take` or `drop` (those are `FStar.Sequence.Base.take`/`drop`
+over `Seq`, not `list`).  Their absence is verified, not assumed: a local copy
+lost the stdlib's length refinement, and restating the refinement was the fix
+(§11, [fstar-proofs §109](../fstar-proofs/SKILL.md)).
+
+For list proofs needing a prefix/suffix, define your own — transparent and
+structural, so plain recursion verifies them:
+
+```fstar
+let rec take (l: list a) (n: nat) : Tot (list a) (decreases n) =
+  if n = 0 then [] else match l with [] -> [] | x::xs -> x :: take xs (n-1)
+let rec drop (l: list a) (n: nat) : Tot (list a) (decreases n) =
+  if n = 0 then l else match l with [] -> [] | x::xs -> drop xs (n-1)
+```
+
+The `decreases n` is a *bare* nat — the safe form on the current parser; see
+[fstar-lang §8](../fstar-lang/SKILL.md) (arithmetic in a `decreases` clause is a
+parse error).
+
+## 13. `Seq.fold_left` / `Seq.count` are gone — convert to a list first
+
+`FStar.Seq` (`FStar.Seq.Base`/`FStar.Sequence`) no longer exports
+`fold_left`/`fold_right`/`count`.  To fold or count over a sequence, convert
+with `Seq.seq_to_list` and use `FStar.List.Tot`:
+
+```fstar
+let count (x: elem) (s: Seq.seq elem) : nat =
+  List.Tot.count x (Seq.seq_to_list s)      -- List.Tot.count : #a:eqtype -> a -> list a -> nat
+```
+
+`List.Tot.count` / `List.Tot.fold_left` / `List.Tot.filter` are what you use.
+`Seq` still has `map_seq`, `init`, `slice`, `seq_to_list`, `seq_of_list`.
+
+## 15. `Seq.seq_to_list`'s head is not SMT-related to `Seq.index 0` — bridge explicitly
+
+`Seq.seq_to_list s`'s head is **not** SMT-equal to `Seq.index s 0` — a bare
+`Lemma` with `= ()` does **not** discharge it (both are opaque projections).  A
+list-level run scanner whose `rest_cond` framing is sequence-level
+(`Seq.length r = 0 \/ not (f (Seq.index r 0))`) needs this explicit bridge, via
+the transparent stdlib uncons laws:
+
+```fstar
+(** Lemma: the head of [Seq.seq_to_list s] is [Seq.index s 0] (non-empty). *)
+let lemma_seq_to_list_head_is_index (s: byte_seq) : Lemma
+  (requires Seq.length s > 0)
+  (ensures (match Seq.seq_to_list s with
+            | [] -> False
+            | hd :: _ -> hd == Seq.index s 0))
+  =
+  let hd = Seq.index s 0 in
+  let tl = Seq.slice s 1 (Seq.length s) in
+  FStar.Seq.Properties.lemma_split s 1;       (* s == cons (index s 0) (slice s 1 len) *)
+  FStar.Seq.Base.lemma_seq_to_list_cons hd tl; (* seq_to_list (cons h tl) == h :: seq_to_list tl *)
+  ()
+```
+
+This is the same class as `lemma_seq_to_list_of_list_append` (§11 bridge):
+`seq_to_list` only unfolds through `FStar.Seq.Base.lemma_seq_to_list_cons` /
+`FStar.Seq.Properties.append_cons` / `lemma_split`, never by SMT alone.  The
+`satisfy_many0`/`satisfy_many1` generic roundtrip (fstar-codec, 0-admit) chains
+`lemma_seq_to_list_of_list_append xs r` (prefix) with
+`lemma_seq_to_list_head_is_index r` (suffix head) so the symbolic-`f` framing
+reaches the list-level scanner `satisfy_run_scan`.
+
+## 14. Wrapping byte arithmetic roundtrip — `U8.t` is OPAQUE, bridge via `v`/`v_inj`
+
+`FStar.UInt8.t` is declared `new val t : eqtype` (opaque), **NOT**
+definitionally equal to `FStar.UInt.uint_t 8` (`x:int{size x 8}`).  So
+`FStar.UInt.lemma_add_sub_cancel #8 a b` (typed over `uint_t n`) does **not**
+unify with `U8.t` arguments.  The `+`/`-` operators on `U8.t` are the
+*bounds-respecting* `add`/`sub` (refined, require `size (v a + v b) 8` — SMT
+cannot discharge for symbolic `a b`).  For **wrapping** arithmetic use
+`FStar.UInt8.sub_mod` / `add_mod` explicitly, and prove the roundtrip identity
+at the `v` level then lift with `v_inj`:
+
+```fstar
+open FStar.UInt8
+let lemma_wrap (a b: t) : Lemma (add_mod (sub_mod a b) b == a) =
+  FStar.UInt.lemma_add_sub_cancel #8 (v a) (v b);   (* over uint_t 8, i.e. int{size .. 8} *)
+  v_inj (add_mod (sub_mod a b) b) a                  (* v_inj : v x == v y ==> x == y *)
+```
+
+`lemma_add_sub_cancel #n a b : Lemma (add_mod (sub_mod a b) b == a)` and its
+dual `lemma_sub_add_cancel #n a b : Lemma (sub_mod (add_mod a b) b == a)` are
+in `FStar.UInt.fsti` (~line 592).  The PNG filter roundtrips (Sub/Up/Average/
+Paeth) all collapse to exactly this identity — the *predictor* value is
+irrelevant to its own inverse: `(x - p) + p == x` for ANY byte `p`.

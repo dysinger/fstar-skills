@@ -1,42 +1,56 @@
 ---
 name: fstar
-description: F* language — index to sub-skills covering language, stdlib, proofs, Low*, and build.
+description: F* language — index to sub-skills covering the language, the stdlib, proofs, the build, and documentation, for the current F* toolchain (Custard/Pulse, Z3 5.3.0).
 ---
 
 # F\* (FStar) — Skill Index
 
 F* is a dependently typed programming language combining SMT-based verification
-with C/OCaml/WASM extraction.  This skill is split into focused sub-skills.
+with extraction to OCaml and to C (via **Custard**, driven by **Pulse**).  These
+skills describe **one** toolchain — the current F\* build:
 
-> **Two toolchain eras live in this repo.**  The six sub-skills below
-> (`fstar-lang` … `fstar-docs`) are **pinned to F\* ≤ 2025.12.15** — the
-> Low\*/KaRaMeL era (`Stack`, `LowStar.Buffer`, `krml`, `FStar.Mul`,
-> `op_Multiply`).  For **F\* ≥ v2026.09.20**, which *removed* Low\*/KaRaMeL and
-> shipped Custard + Pulse, read [`fstar-2026.09.20`](fstar-2026.09.20/SKILL.md)
-> instead (C extraction is via Custard's Pulse rules, not `LowStar.Buffer`).
+| What | Today |
+|---|---|
+| Language surface | Custard + Pulse (`#lang-pulse`, `fn`, `pts_to`) |
+| Stateful / C-extractable | Pulse — the only such language; `Pulse.Lib.*` (~81 modules under `ulib/pulse/lib/pulse/lib/`) |
+| SMT solver | **Z3 5.3.0** — stricter than 4.13.3; a lost instantiation, not a lost budget |
+| Multiplication | `a * b` **is** multiplication, no `open` (`FStar.Mul` does not exist) |
+| Extraction | Custard: `--codegen Custard --custard_backend C` (or `OCaml`/`FSharp`) |
 
-> ⚠️ **There is no reliable F\* auto-formatter in ≥ v2026.09.20.**
-> `--print`, `--print_in_place`, and the `--ide` `format` query all rewrite
-> `(* *)` comments into invalid `//` comments and crash on `#lang-pulse`
-> modules.  Leave `.fst`/`.fsti` hand-formatted (see
-> [fstar-2026.09.20 §7](fstar-2026.09.20/SKILL.md)).
+> ⚠️ **There is no reliable F\* auto-formatter.**  `--print`,
+> `--print_in_place`, and the `--ide` `format` query all rewrite `(* *)`
+> comments into invalid `//` comments and crash on `#lang-pulse` modules.  Leave
+> `.fst`/`.fsti` hand-formatted (see [fstar-docs §11](fstar-docs/SKILL.md)).
 >
-> ⚠️ **Comment *layout* near the varint arithmetic lemmas is SMT-fragile.**
-> In ≥ v2026.09.20, collapsing the fragmentary `(** *)` one-liners around
+> ⚠️ **Comment *layout* near SMT-fragile arithmetic lemmas is fragile.**  In one
+> package, collapsing the fragmentary `(** *)` one-liners around
 > `nbytes_of_varint`/`lemma_varint_*byte_arithmetic` into single blocks
-> **correlated with** the non-terminating Pulse varint roundtrip hang (100% CPU
-> z3) in one session — the mechanism is unproven (SMTPat triggers are
-> term-structural), so treat it as "re-verify after any edit there", not an
-> immutable rule.  See [fstar-2026.09.20 §3 rule 6](fstar-2026.09.20/SKILL.md).
+> **correlated with** a non-terminating Pulse varint roundtrip hang (100% CPU
+> z3).  The mechanism is unproven (SMTPat triggers are term-structural), so
+> treat it as "re-verify after any edit there", not an immutable rule.  See
+> [fstar-docs §13](fstar-docs/SKILL.md).
+
+**Skills:** [fstar-lang](fstar-lang/SKILL.md) · [fstar-stdlib](fstar-stdlib/SKILL.md) ·
+[fstar-proofs](fstar-proofs/SKILL.md) · [fstar-build](fstar-build/SKILL.md) ·
+[fstar-docs](fstar-docs/SKILL.md)
 
 ## Quick Reference
 
 | I need to… | Read |
 |---|---|
-| Work against F\* ≥ v2026.09.20 (Custard, Pulse, no Low\*) | [fstar-2026.09.20](fstar-2026.09.20/SKILL.md) |
-| Understand types, effects, operators, syntax (≤ 2025.12.15) | [fstar-lang](fstar-lang/SKILL.md) |
-| Use Seq, List, Map, Set, Option (≤ 2025.12.15) | [fstar-stdlib](fstar-stdlib/SKILL.md) |
-| Write lemmas, proofs, SMTPat, handle GADT barriers (≤ 2025.12.15) | [fstar-proofs](fstar-proofs/SKILL.md) |
+| Extract to C with Custard/Pulse: the backend enum, the required flags, the C layout choices, the backend matrix | [fstar-build §15](fstar-build/SKILL.md) |
+| Write a Pulse `fn` that extracts to clean C11: bounds in types, `Int.Cast` not `.v`, `noextract` specs | [fstar-build §16](fstar-build/SKILL.md) |
+| Errors 317/368/134/285/180 in the Custard/Pulse surface | [fstar-build §17](fstar-build/SKILL.md) |
+| A proof broke after a **Z3 bump** (5.3.x): `Failed to prove` or a *misleading* "timed out, increase the rlimit" — it is a LOST INSTANTIATION, not lost budget; name the fact, don't raise the limit | [fstar-proofs §116](fstar-proofs/SKILL.md) |
+| A consumer flake now fails with `Function called without required argument "mimalloc-src"` | [fstar-build §14](fstar-build/SKILL.md) |
+| Understand types, effects, operators, syntax | [fstar-lang](fstar-lang/SKILL.md) |
+| Use Seq, List, Map, Set, Option | [fstar-stdlib](fstar-stdlib/SKILL.md) |
+| `FStar.List.Tot` has no `take`/`drop`; `Seq.fold_left`/`Seq.count` are gone; `seq_to_list` head ≠ `index 0` | [fstar-stdlib §12–§14](fstar-stdlib/SKILL.md) |
+| Write lemmas, proofs, SMTPat, handle GADT barriers | [fstar-proofs](fstar-proofs/SKILL.md) |
+| **Z3 5.3.0** stops deriving a fact it used to find, and reports it as `Failed to prove` or a *misleading* "timed out, increase the rlimit" — the four measured diagnostics | [fstar-proofs §116](fstar-proofs/SKILL.md) |
+| `decreases` with arithmetic fails to parse; `U8.t` is opaque (`v`/`v_inj`); `forall_intro_2` needs explicit `#p`; `assert_norm` will not reduce a `let` | [fstar-build §18](fstar-build/SKILL.md) |
+| Reorder / split a proof-heavy module: `#push`/`#pop` unit extraction, tier closure, core vocabulary | [fstar-build §19](fstar-build/SKILL.md) |
+| Make extracted repos uniform: byte-identical files, the deliverable set, unwrapped OCaml deps, local sibling flakes | [fstar-build §20](fstar-build/SKILL.md) |
 | Debug codec combinator opacity, `.wfcv`/`.rest_cond` admits | [fstar-proofs §18](fstar-proofs/SKILL.md) |
 | Make a `codec`-style record **bidirectional** (both laws); `remainder s` vs Lean's `Suffix n`; tautology trap | [fstar-proofs §87](fstar-proofs/SKILL.md) |
 | A law that **fails in both `match` branches** — missing antecedent vs too-weak law | [fstar-proofs §88](fstar-proofs/SKILL.md) |
@@ -49,15 +63,16 @@ with C/OCaml/WASM extraction.  This skill is split into focused sub-skills.
 | About to blame the **solver / toolchain / a numeric literal** — first look for a **counterexample to your own obligation** | [fstar-proofs §95](fstar-proofs/SKILL.md) |
 | A **backward law** will not prove for a decoder — check whether `dec` accepts **non-image input** (overlong / alternate encodings); if so it is a design decision, not a proof | [fstar-proofs §96](fstar-proofs/SKILL.md) |
 | Run that canonicality check as a **sweep over every leaf** — the cheap two-shape test, and why a per-field disposition table structurally cannot see the defect | [fstar-proofs §96](fstar-proofs/SKILL.md) |
-| `open FStar.Mul` fails under F\* ≥ v2026.09.20 (`Error 134`) — use `FStar.Math.Lemmas`; the LSP tool tolerates the old name | [fstar-proofs §98](fstar-proofs/SKILL.md) |
+| `open FStar.Mul` fails (`Error 134`) — `a * b` **is** multiplication now, so delete the `open`; the LSP tool historically disagreed with the runner in both directions | [fstar-proofs §98](fstar-proofs/SKILL.md) |
 | Tempted to **weaken the law** so a permissive decoder fits? It is a dead end — the True/canonical dichotomy, and why `product`'s STEP kills it | [fstar-proofs §99](fstar-proofs/SKILL.md) |
 | Proof over a **big-int encoder** is slow (100 s+) — stub lemmas, unsplit identity+range, or unrolled recursion | [fstar-proofs §97](fstar-proofs/SKILL.md) |
 | **Route 1 of §93 worked end-to-end**: a decoder whose return type is indexed by its input, proven both ways — count decoder + refined accessor + one conversion | [fstar-proofs §93](fstar-proofs/SKILL.md) |
-| **Split a module** safely: `make check` does not track deps; `include` ≠ `open`; unclosed `(** *` swallows a file; tier closure | [fstar-2026.09.20 §10](fstar-2026.09.20/SKILL.md) |
+| **Split a module** safely: `make check` does not track deps; `include` ≠ `open`; unclosed `(** *` swallows a file; tier closure | [fstar-build §10b](fstar-build/SKILL.md) + [fstar-lang §2](fstar-lang/SKILL.md) + [fstar-docs §12](fstar-docs/SKILL.md) + [fstar-build §19](fstar-build/SKILL.md) |
 | A **cross-repo parity gate** goes red after unrelated work — stash-test first; a check must compare the **shared** parts, not demand equality (a sibling's addition is not your regression) | [fstar-build §12](fstar-build/SKILL.md) |
 | A **grep-based gate** (0 admits / rlimit) reports `clean` — check its file glob matches what you verify, and that its comment stripper is **nesting-aware** | [fstar-build §10](fstar-build/SKILL.md) |
 | `make check` says **"Nothing to be done"** and exits 0 — force a real baseline with `OUT=/tmp/<fresh>`; it does not track dependencies | [fstar-build §10b](fstar-build/SKILL.md) |
 | A published **lemma count** is wrong — `^let lemma_` misses **both** `let rec lemma_*` (31 in one library) **and** Pulse `fn lemma_*` (9); "every lemma is anchored" is a claim to check, not assume; a count without its command drifts | [fstar-build §11](fstar-build/SKILL.md) |
+| **Moving the F* pin** across releases: the upstream tag itself may not build (z3 5.x inherited patch), every consumer must pass newly-required args (`mimalloc-src`), and the new default solver invalidates proofs in the fork *and* downstream — the gate is per-repo `nix build .#checked`, not `flake metadata` | [fstar-build §14](fstar-build/SKILL.md) |
 | A **coverage sweep** reports "nothing missing" — re-run it with `^(let|let rec|fn) lemma_`; also: "used in `src/`" ≠ "anchored" (a lemma with no present consumer is caught *only* by its anchor), and never anchor dead code | [fstar-proofs §101](fstar-proofs/SKILL.md) |
 | `forall_intro` fails with a bare `Error 19` — it does **not** discharge the lemma's `requires`; let SMT prove the `forall` directly. Also: a `let`-bound `prop` won't unfold into an argument, and `U8.uint_to_t` is `irreducible` (needs `vu_inv`) | [fstar-proofs §103](fstar-proofs/SKILL.md) |
 | A proved roundtrip will not fit the law — check **which branch** the decoder takes at the *consumer's* budget; a side condition that is sometimes vacuous means **split the peel**, not add a hypothesis | [fstar-proofs §106](fstar-proofs/SKILL.md) |
@@ -75,8 +90,7 @@ with C/OCaml/WASM extraction.  This skill is split into focused sub-skills.
 | Audit cross-module buffer layouts (F* ↔ C) | [fstar-proofs §33](fstar-proofs/SKILL.md) |
 | Audit admit()-bodied functions for buffer overflows | [fstar-proofs §34](fstar-proofs/SKILL.md) |
 | Audit admit counts across docs/source (drift) | [fstar-proofs §40](fstar-proofs/SKILL.md) |
-| Extract to C via KaRaMeL, Low\* buffers (≤ 2025.12.15) | [fstar-lowstar](fstar-lowstar/SKILL.md) |
-| Build, compile, nix derivations, OCaml extraction (≤ 2025.12.15) | [fstar-build](fstar-build/SKILL.md) |
+| Build, compile, nix derivations, OCaml extraction, the F\* pin | [fstar-build](fstar-build/SKILL.md) |
 | Write documentation, fsdoc comments, module headers | [fstar-docs](fstar-docs/SKILL.md) |
 | Cite code locations in plans/notes — **never bare line numbers**; re-derive with an owner-aware scan, and **never trust a carried total** | [fstar-docs §10](fstar-docs/SKILL.md) |
 
@@ -86,14 +100,14 @@ with C/OCaml/WASM extraction.  This skill is split into focused sub-skills.
 |---|---|
 | 19 (subtyping, GADT type-refinement) | fstar-proofs §10 |
 | 19 (opaque record field: codec .wfcv/.rest_cond) | fstar-proofs §18 |
-| 47 (duplicate names, .fsti/.fst) | fstar-build § Module System |
-| 53 (Ghost/Stack composition) | fstar-proofs §7 |
-| 56 (bound variable escapes) | fstar-lowstar § Int.Cast Wrappers |
-| 72 (identifier not found) | fstar-lang § Module System |
-| 114 (pattern type mismatch) | fstar-lang § Match Syntax |
-| 189 (C.Loops.while API) | fstar-lowstar § C.Loops |
-| 233 (forward reference) | fstar-build § Module System |
-| 308 (recursive dependency) | fstar-build § Module System |
+| 47 (duplicate names, .fsti/.fst) | fstar-lang §2 |
+| 53 (Ghost/effectful composition) | fstar-proofs §7 |
+| 56 (bound variable escapes) | fstar-proofs §12 (wrap in `inline_for_extraction Tot`) |
+| 72 (identifier not found — usually a missing `open`, or a name only `include`d) | fstar-lang §2 |
+| 114 (pattern type mismatch — GADT or-pattern binds different types) | fstar-proofs §12 |
+| 189 (loop / `decreases` / bad `*`-as-multiply shape) | fstar-lang §15, fstar-build §18 |
+| 233 (forward reference) | fstar-lang §2 (`val` in a `.fsti`; move the def earlier) |
+| 308 (recursive dependency) | fstar-lang §2 |
 
 ## Keyword Collisions
 
@@ -104,7 +118,7 @@ with C/OCaml/WASM extraction.  This skill is split into focused sub-skills.
 | `fail`, `try`, `eof` | `fail_`, `try_`, `eof_` | fstar-lang |
 | `type`, `match`, `let`, `in`, `if`, `then`, `else`, `fun`, `function` | Reserved — cannot use | fstar-lang |
 | `module`, `open`, `val`, `rec`, `class`, `instance`, `effect` | Reserved — cannot use | fstar-lang |
-| `label` (in `#lang-pulse` modules only) | Reserved Pulse keyword — can't be a combinator or record field | fstar-2026.09.20 |
+| `label` (in `#lang-pulse` modules only) | Reserved Pulse keyword — can't be a combinator or record field | [fstar-build §16](fstar-build/SKILL.md) |
 
 ## Module System
 
@@ -121,7 +135,7 @@ For re-exporters, use `include`.  For internal use, use `open`.
 > names one of `M`'s functions gets `Error 72` — at a *downstream* module,
 > which misdiagnoses the problem.  Write `include M` **and** `open M`.
 > (Found 2026-11-01 splitting `Data.Codec.Types`; see
-> [fstar-2026.09.20 §10.2](fstar-2026.09.20/SKILL.md).)
+> [fstar-lang §2](fstar-lang/SKILL.md).)
 Full details: [fstar-lang](fstar-lang/SKILL.md) § Module System.
 
 ## Effect Hierarchy
@@ -134,14 +148,17 @@ PURE → Tot → GHOST → GTot → STATE
 - `Tot a` — total pure computation
 - `GTot a` — total ghost (erased at extraction)
 - `Lemma (requires pre) (ensures post)` — squashed proof (`Pure unit pre (fun _ -> post)`)
-- `Stack` — Low* stateful, extractable to C (≤ 2025.12.15; removed in ≥ v2026.09.20 — use Pulse `fn`)
+- **Pulse `fn`** — the stateful, C-extractable language (`#lang-pulse`), with
+  `requires`/`ensures` over `pts_to` views.  It is a separate language surface,
+  not an effect in the `Tot`/`GTot` hierarchy above.
+  See [fstar-build §15–§16](fstar-build/SKILL.md).
 
 Full details: [fstar-lang](fstar-lang/SKILL.md) § Effect System.
 
 ## Syntax Quick Hits
 
 - `a & b` is a tuple type; `(a, b)` is a tuple value
-- `a * b` is a TUPLE TYPE (not multiplication) in ≤ 2025.12.15 — `open FStar.Mul` for multiply there; **in ≥ v2026.09.20 `*` IS multiplication** (`FStar.Mul` deleted)
+- `a * b` **is multiplication** — no `open` needed (`FStar.Mul` does not exist)
 - `a -> Tot b` is a total arrow
 - `#a:Type` is an implicit argument (compiler infers)
 - `{| d : hasEq a |}` is a typeclass dictionary (spaces required)

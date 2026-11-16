@@ -5,9 +5,7 @@ description: F* documentation — fsdoc comment format, module headers, LSP hove
 
 # F\* Documentation (fsdoc)
 
-> **Version:** pinned to F\* ≤ 2025.12.15 (Low*/KaRaMeL era).
-> For ≥ v2026.09.20 (Custard/Pulse, `krml`/Low* removed), see
-> [`fstar-2026.09.20`](../fstar-2026.09.20/SKILL.md).
+> **Toolchain:** F\* latest — Custard/Pulse, Z3 5.3.0, no KaRaMeL/Low\*.
 > Cross-reference: [fstar index](../SKILL.md).
 
 F* uses `(** ... *)` doc comments, identical to OCaml's ocamldoc format.
@@ -355,3 +353,78 @@ hold (a fabricated span-attribution bug; an early tally).  Both were **removed
 and the removal recorded**, rather than quietly edited out.  A research note
 that only ever accretes findings cannot be trusted: a retraction is the signal
 that the document is being checked.
+
+## 11. The F\* formatter is broken upstream — do **not** wire it into treefmt
+
+There is **no reliable F\* auto-formatter**.  Measured on the LSP fork:
+
+- `fstar.exe --print` / `--print_in_place` **rewrite `(* … *)` inline comments
+  into `//` line comments**, which F\* cannot parse (Error 168 — `//` is not a
+  comment in F\*, only `(* *)` and `///`).
+- They also **lower-case hex literals** (`0x6Cuy` → `0x6cuy`) and restructure
+  code (collapse `if/else` chains onto one line).
+- `--print`, `--print_in_place`, and the `fstar.exe --ide` `format` query all
+  **crash with "Pattern matching failed" in `FStarC_Parser_ToDocument.ml`** on
+  `#lang-pulse` modules (line 932 of the compiled `fstarc.ml`).  The `--ide`
+  `format` query also *stalls* on larger pure modules.
+
+**Consequence:** leave `.fst`/`.fsti` hand-formatted.  For `treefmt.nix`, format
+only nix (and skip the F\* files, documenting why).  The same applies to
+prettier on prose markdown — it churns legal/changelog docs and hand-written
+prose (double-space sentence gaps, `*`/`F*` emphasis).
+
+## 12. An unclosed `(** … *` silently swallows the rest of the file
+
+A doc comment opened `(** foo *` (missing the closing paren) does not error.  It
+consumes everything to the end of the file (or to the next `*)`), and the
+module **verifies green with most of its definitions gone**.
+
+This bit during a mechanical move: a section header written as
+`(** Character predicates *` hid ~100 lines — `is_upper` through `digit_byte`.
+`make check` was green.  The tell was that `include Data.Codec.Text` appeared
+not to re-export, and only three symbols were reachable — so the "include
+doesn't work" hypothesis was wrong and the file was truncated.
+
+**Checks:**
+
+```bash
+# every (* / (** must be closed; a quick structural scan
+python3 - src/*.fst <<'PY'
+import sys
+for path in sys.argv[1:]:
+    L=open(path).read().split('\n'); i=0; bad=[]
+    while i<len(L):
+        if '(*' in L[i] and '*)' not in L[i]:
+            j=i+1
+            while j<len(L) and '*)' not in L[j]: j+=1
+            if j>=len(L): bad.append((i+1,L[i][:60]))
+            i=j+1
+        else: i+=1
+    print(path, 'unclosed:', bad)
+PY
+
+# and check the module actually exports what you think
+grep -cE '^(let |let rec |type )' src/Data.Codec.Text.fst   # expect the full count
+```
+
+**Meta-lesson:** after a mechanical move, count the definitions.  "It
+verified" is not evidence that the code is present.  (Same family as
+§8 — a premature `*)` — but silent instead of loud.)
+
+## 13. Comment layout near SMT-fragile lemmas: re-verify, don't trust
+
+Collapsing the fragmentary `(** … *)` one-liners around
+`nbytes_of_varint` / `lemma_nbytes_of_varint_bound` /
+`lemma_varint_*byte_arithmetic` **correlated with** the Pulse varint roundtrip
+becoming a non-terminating z3 spin (reproduced 4× in one session, ~100% CPU,
+no `stopped` state; reverting the collapse restored GREEN).
+
+The *mechanism* is not established — SMTPat triggers are term-structural, not
+line-number-dependent, so "line numbers → z3 spin" is an **observed
+correlation, not a verified rule** (cache/source-position perturbation is an
+alternative explanation).  **Practical rule:** treat any edit near SMT-fragile
+arithmetic lemmas as requiring a re-verify, and do not bulk-collapse that
+region's comments as a drive-by "cleanup".  By contrast the non-varint stacked
+fsdoc collapses (`nat_of_int`, `u32_of_nat`, `mk_decode_error`,
+`string_is_ascii`, `u32_of_small_nat`) were safe and landed.  See also
+[fstar-build §16](../fstar-build/SKILL.md) for the hang signature.

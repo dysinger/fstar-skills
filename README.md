@@ -2,36 +2,26 @@
 
 A collection of skills for the [F*](https://www.fstar-lang.org/) programming
 language — a dependently typed language that combines SMT-based verification
-with extraction to C, OCaml, and WASM.
+with extraction to C and OCaml.
 
 These skills capture hard-won, verified experience: proof patterns, SMT
-limitations, Low\* buffer patterns, KaRaMeL extraction gotchas, and build
-recipes.  They are written to be reused by anyone writing or verifying F*
-code.
+limitations, Pulse idioms and Custard extraction gotchas, and build recipes.
+They are written to be reused by anyone writing or verifying F* code.  They
+describe **the current F\* toolchain** — Custard + Pulse, Z3 5.3.0, no
+KaRaMeL/Low\*.
 
 ## What's inside
 
-Two toolchain eras live side-by-side in this repo:
-
-- **The original six sub-skills are pinned to F\* ≤ 2025.12.15** — the
-  Low\*/KaRaMeL era (`Stack`, `LowStar.Buffer`, `krml`, `FStar.Mul`,
-  `op_Multiply`).
-- **`fstar-2026.09.20` is for F\* ≥ v2026.09.20** — the release that *removed*
-  Low\*/KaRaMeL and shipped Custard + Pulse.
-
-| Skill | Version | Covers |
-|---|---|---|
-| [`fstar-2026.09.20`](fstar-2026.09.20/SKILL.md) | ≥ v2026.09.20 | Custard extractor, Pulse `fn`/`pts_to`, post-KaRaMeL toolchain delta, nix wiring |
-| [`fstar-lang`](fstar-lang/SKILL.md) | ≤ 2025.12.15 | Types, effects, operators, syntax, modules, typeclasses, tuples, termination |
-| [`fstar-stdlib`](fstar-stdlib/SKILL.md) | ≤ 2025.12.15 | `Seq`, `List`, `Map`, `Set`, `Option`, `Classical`, `Squash` |
-| [`fstar-proofs`](fstar-proofs/SKILL.md) | ≤ 2025.12.15 | Lemmas, SMTPat, induction, GADT barriers, Ghost/Stack bridging, proof errors |
-| [`fstar-lowstar`](fstar-lowstar/SKILL.md) | ≤ 2025.12.15 | Low\* buffers, KaRaMeL C extraction, `Int.Cast`, `C.Loops` |
-| [`fstar-build`](fstar-build/SKILL.md) | ≤ 2025.12.15 | Verification commands, nix derivations, OCaml extraction |
-| [`fstar-docs`](fstar-docs/SKILL.md) | both | fsdoc comments, module headers, documentation standards |
+| Skill | Covers |
+|---|---|
+| [`fstar-lang`](fstar-lang/SKILL.md) | Types, effects, operators, syntax, modules, typeclasses, tuples, termination |
+| [`fstar-stdlib`](fstar-stdlib/SKILL.md) | `Seq`, `List`, `Map`, `Set`, `Option`, `Classical`, `Squash` |
+| [`fstar-proofs`](fstar-proofs/SKILL.md) | Lemmas, SMTPat, induction, GADT barriers, effectful bridging, Z3 5.3.0 diagnostics, proof errors |
+| [`fstar-build`](fstar-build/SKILL.md) | Verification commands, Custard/Pulse C extraction, nix derivations, OCaml extraction, the F\* pin |
+| [`fstar-docs`](fstar-docs/SKILL.md) | fsdoc comments, module headers, documentation standards |
 
 Start at [`SKILL.md`](SKILL.md) for a quick-reference index (common errors,
-keyword collisions, effect hierarchy), then open the sub-skill for your task
-and toolchain version.
+keyword collisions, effect hierarchy), then open the sub-skill for your task.
 
 ## Installation
 

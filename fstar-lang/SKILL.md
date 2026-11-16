@@ -5,9 +5,7 @@ description: F* core language — types, effects, operators, syntax, modules, ty
 
 # F\* Core Language
 
-> **Version:** pinned to F\* ≤ 2025.12.15 (Low*/KaRaMeL era).
-> For ≥ v2026.09.20 (Custard/Pulse, `krml`/Low* removed), see
-> [`fstar-2026.09.20`](../fstar-2026.09.20/SKILL.md).
+> **Toolchain:** F\* latest — Custard/Pulse, Z3 5.3.0, no KaRaMeL/Low\*.
 > Extracted from the full F* skill.  Cross-reference: [fstar index](../SKILL.md).
 
 ---
@@ -85,7 +83,7 @@ F* supports splitting a module into interface (`.fsti`) and implementation (`.fs
 
 **What can go in `.fsti`**: `type` definitions (including GADTs), `val` declarations, pure `let` definitions, `unfold let`, `assume`, `open`, module aliases.
 
-**What CANNOT**: Effectful `let` definitions (Stack, STATE), `let rec ... and ...` implementations.
+**What CANNOT**: Effectful `let` definitions (STATE / Pulse), `let rec ... and ...` implementations.
 
 **Why use `.fsti`**:
 - Forward declarations: `val` in `.fsti` makes a function available anywhere in `.fst`
@@ -107,7 +105,7 @@ F* supports splitting a module into interface (`.fsti`) and implementation (`.fs
 
 ### Module Alias Shadowing
 
-When both `LowStar.Buffer` and `LowStar.Monotonic.Buffer` are opened, the second shadows names from the first. Module aliases (`module LB = LowStar.Buffer`) may resolve to the wrong module due to `open` taking precedence in name resolution. Use fully qualified names when ambiguous.
+When two modules that export the same name are both `open`ed, the second shadows names from the first. Module aliases (`module X = Some.Long.Module`) may resolve to the wrong module due to `open` taking precedence in name resolution. Use fully qualified names when ambiguous.
 
 ### Module Aliases Are Not Re-Exported via `open`
 
@@ -152,7 +150,6 @@ PURE → Tot → GHOST → GTot → STATE
 | `Pure a pre post` | Hoare-style PURE | Requires/ensures |
 | `Ghost a pre post` | Hoare-style GHOST | Requires/ensures, erased |
 | `Lemma pre post` | `Pure unit pre (fun r -> post)` | Squashed proof |
-| `Stack a pre post` | Low* stateful | C-extractable |
 
 ### Lemma Syntax
 
@@ -168,15 +165,22 @@ Lemma (requires pre) (ensures post) (decreases d)
 ### Effect Compatibility
 
 - `Tot <: GTot` — can call Tot from GTot
-- `Tot <: Stack` — can call Tot from Stack
-- `GTot` is NOT a sub-effect of `Stack` — cannot call GTot from Stack (Error 53)
-- `Stack` is NOT a sub-effect of `GTot` — cannot call Stack from Lemma
+- `GTot` is NOT a sub-effect of `Tot` — a ghost computation cannot be run in a
+  pure body; crossing this way (e.g. computing a `Ghost`/`GTot` value inside an
+  effectful body and passing it to a `Lemma`) is **Error 53**.  Bridge it by
+  passing the value explicitly to the lemma instead, and see
+  [fstar-proofs §7](../fstar-proofs/SKILL.md) for the patterns.
+- **Stateful code is Pulse**: a `#lang-pulse` `fn` with `requires`/`ensures` over
+  `pts_to` views — the only stateful effect that extracts to C (Custard).
+  See [fstar-build §15](../fstar-build/SKILL.md).
 
 ---
 
 ## 4. Numeric Operators
 
-**`a * b` creates a TUPLE TYPE, not multiplication.** Use `Prims.op_Multiply a b` or open `FStar.Mul`.
+**`a * b` IS multiplication** — no `open` needed.  `FStar.Mul` no longer exists
+(`Error 134` / Warning 285 if you write the `open`), so every `open FStar.Mul`
+you find in old code is dead and must be deleted.
 
 | Operator | Prims Name | Concrete Syntax |
 |---|---|---|
@@ -191,7 +195,7 @@ Lemma (requires pre) (ensures post) (decreases d)
 | `>` | `op_GreaterThan` | `a > b` |
 | `=` | `op_Equality` | `a = b` (eqtype) |
 | `<>` | `op_disEquality` | `a <> b` (eqtype) |
-| `*` | `op_Multiply` | tuple by default; multiply if `FStar.Mul` open |
+| `*` | `op_Multiply` | `a * b` — multiplication, out of the box |
 
 ### `nat - nat` Returns `int`
 
@@ -419,7 +423,7 @@ let unsafe_coerce (#a #b: Type) (x: a) : b = admit (); x
 
 ### Effect Name Collisions with GADT Constructors
 
-Avoid naming GADT constructors `Pure`, `Lemma`, `Ghost`, `Stack`, `Tot`, `GTot`, `Dv`, `St`, `Ex`, `ML`, `ALL` — these shadow effect names. If unavoidable, use fully qualified `Prims.Pure` to disambiguate.
+Avoid naming GADT constructors `Pure`, `Lemma`, `Ghost`, `Tot`, `GTot`, `Dv`, `St`, `Ex`, `ML`, `ALL` — these shadow effect names. If unavoidable, use fully qualified `Prims.Pure` to disambiguate.
 
 ---
 
@@ -504,9 +508,12 @@ let lemma_cast_value (x: U32.t {U32.v x < 256})
 
 ## 15. Gotchas
 
-### `else` of `if i < n` gives `~(i < n)`, NOT `i >= n`
+### `else` of `if not (i < n)` gives `~~(i < n)`, not `i >= n` as a usable fact
 
-F* puts `~(i < n)` in the SMT context for the `else` branch, not `i >= n`.
+F* puts the *literal negation* of the condition in the SMT context for the
+`else` branch.  A source `if i < n then … else …` gives `~(i < n)`, and a
+source `if not b then … else …` gives `~~b`; neither is rewritten into the
+positive form a lemma's `requires` is stated in.
 Rewrite with the positive condition:
 
 ```fstar
@@ -537,16 +544,16 @@ if time_ok then (
 The `let`-binding makes the condition a named SMT term.  `assert` forces
 SMT to discharge it in its own query.  Used with `--split_queries always`.
 
-### `*` without `open FStar.Mul` is a tuple type operator
+### `*` is multiplication out of the box — and a stray `open FStar.Mul` is an error
 
-By default, `a * b` is a tuple type. For multiplication, `open FStar.Mul`.
-Without it, `acc * 10` produces Error 189: "Expected expression of Type got nat."
+`a * b` on `int`/`nat` is multiplication, with **no `open`** of any kind (the
+module `FStar.Mul` no longer exists).  Two consequences for old code:
 
-**Cache-masked bug**: `open FStar.Mul` from an imported module is NOT transitive.
-However, `--cache_checked_modules` loads transitive `.checked` files which carry
-`FStar.Mul` in their environment, masking the missing import.  A from-source
-LSP check always catches this.  Every module using `*` for multiplication
-MUST have its own `open FStar.Mul`.  See fstar-proofs §35.
+- `open FStar.Mul` is now a hard `Error 134` (Warning 285 if nothing in the
+  namespace exists at all); `open FStar.Math.Lemmas` is *not* needed to make
+  `*` multiply.  See [fstar-proofs §98](../fstar-proofs/SKILL.md).
+- `a * b` as a **tuple type** is no longer the default reading, so a type
+  written `a * b` where a pair was meant must be written `a & b`.
 
 ### `decreases` must be on the SAME LINE as the return type
 
@@ -563,7 +570,7 @@ let rec f (a: nat) (b: nat) (n: nat)
 
 ### Effect name collisions with GADT constructors
 
-Avoid naming GADT constructors `Pure`, `Lemma`, `Ghost`, `Stack`, `Tot`,
+Avoid naming GADT constructors `Pure`, `Lemma`, `Ghost`, `Tot`,
 `GTot`, `Dv`, `St`, `Ex`, `ML`, `ALL`. These shadow effect names.
 If unavoidable, use fully qualified `Prims.Pure`.
 
@@ -630,23 +637,23 @@ let _test_clow_opt : Foo.Codec.Low.opt_c_tok = Foo.Codec.Low.O_None
 Also applies to: `tag_of`, `tag_to_type`, `lemma_roundtrip`, `encode`,
 `decode`, `O_Some` — any name shared between parallel Low* modules.
 
-### `;` before `#pop-options` in Stack function — Syntax Error 168
+### `;` before `#pop-options` in an effectful function — Syntax Error 168
 
 `;` is the sequencing operator in F*.  The parser expects an expression
-after `;`.  When the last expression in a Stack function body ends with
+after `;`.  When the last expression in an effectful function body ends with
 `;` and the next token is `#pop-options`, the parser sees `expr; #pop-options`
 which is invalid — `#pop-options` is a directive, not an expression.
 
 ```fstar
 (* BROKEN — trailing semicolon before #pop-options *)
 #push-options "--z3rlimit 20"
-let my_function ... : Stack unit ... =
+let my_function ... : Tot unit ... =
   ... body steps ...;
   last_step arg1 arg2;  (* <--- THIS SEMICOLON *)
 #pop-options
 
 (* FIXED — remove trailing semicolon *)
-let my_function ... : Stack unit ... =
+let my_function ... : Tot unit ... =
   ... body steps ...;
   last_step arg1 arg2  (* no semicolon *)
 #pop-options
@@ -657,21 +664,21 @@ The real bug is the `;` on the PREVIOUS expression.
 
 See also: fstar-proofs §37 (full analysis with detection patterns).
 
-### `if-then` without `else` in `C.Loops.for` callback body — Syntax Error 168
+### `if-then` without `else` as a whole `unit`-returning body — Syntax Error 168
 
-A `C.Loops.for` loop body is a function returning `Stack unit`.  When
-the ENTIRE body is `if cond then expr` without `else`, F* reports
-Error 168 because the function type `Stack unit` requires both branches
-to return `unit`.
+A loop callback that returns `unit` (in Pulse: the body of a `for`/`while`
+`fn`; in older code a `C.Loops.for` callback) is a function whose return type
+is `unit`.  When the ENTIRE body is `if cond then expr` without `else`, F*
+reports Error 168 because `unit` requires both branches to produce `unit`.
 
 ```fstar
 (* BROKEN — if-then without else is the sole expression *)
-let body (i: U32.t {...}) : Stack unit ... =
+let body (i: U32.t {...}) : Tot unit =
   if not (U8.eq (B.index buf i) (B.index expected i)) then
     B.upd result 0ul 0uy
 
 (* FIXED *)
-let body (i: U32.t {...}) : Stack unit ... =
+let body (i: U32.t {...}) : Tot unit =
   if not (U8.eq (B.index buf i) (B.index expected i)) then
     B.upd result 0ul 0uy
   else ()
@@ -703,5 +710,3 @@ let u8_to_u32 (x: U8.t) : Tot U32.t = FStar.Int.Cast.uint8_to_uint32 x
 Without the `: Tot U32.t` annotation: Error 56 (bound variable escapes).
 With annotation but bare name: Error 189 (function type).
 With annotation + fully qualified name: passes.
-
-See also: fstar-lowstar §4.
