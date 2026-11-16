@@ -925,7 +925,7 @@ extractor whose C backend emits direct C11 with **no runtime glue**, and
 understands.  There is no other route to C.
 
 ```fstar
-module Data.Codec.Low
+module Data.Codec.Pulse
 #lang-pulse
 
 open Pulse
