@@ -8661,3 +8661,48 @@ The `ulib` bridge assert and the `SizeT` binding asserts are plain `assert`s of
 true equations — they cost nothing under 4.13.3 and they are what makes the
 proofs survive 5.3.x.  Prefer that shape over any `--z3rlimit` bump: limits are
 solver-specific tuning, asserts are statements.
+
+### The sharpest instance: two constants with the SAME NAME
+
+Measured 2026-11-16.  A module defined its own
+
+```fstar
+let rec seq_of_list (l: list byte) : Tot byte_seq = ...
+```
+
+while the stdlib has `FStar.Seq.Base.seq_of_list`.  They are **different
+constants**.  They are equal, provably — but only by induction.
+
+`lemma_len` was stated over the stdlib one:
+
+```fstar
+let lemma_len (l: list byte) : Lemma (length l = Seq.length (Seq.seq_of_list l))
+```
+
+and a downstream lemma whose goal was written over the **local** one failed
+with `Failed to prove`.  Z3 4.13.3 crossed between them; 5.3.0 does not.
+
+What made this expensive is that the error is **indistinguishable from a proof
+gap**: the goal printed is the decoder equation, and the missing fact is an
+equality of two constants that *look identical on the page*.
+
+**The diagnostic.** When a `Failed to prove` shows two subterms that appear
+syntactically equal, check whether they are the *same* constant — grep the
+module for a local definition of the function name.  If you find one, add
+
+```fstar
+let rec lemma_seq_of_list_eq (l: list byte) : Lemma (Seq.seq_of_list l == seq_of_list l) (decreases l)
+  = match l with
+    | [] -> Seq.lemma_eq_intro (Seq.seq_of_list ([] <: list byte)) Seq.empty
+    | h :: t -> lemma_seq_of_list_eq t;
+                Seq.lemma_eq_intro (Seq.seq_of_list (h :: t)) (seq_of_list (h :: t))
+```
+
+and call it.  Note the `[]` case needs the explicit normalization: 5.3.0 will
+not prove `Seq.seq_of_list [] == seq![]` across the notation.  A companion
+`lemma_len_local` stated over the local function is usually wanted too, since
+the length fact is what the consumer actually needs.
+
+**Rule.** Two identically-named constants in different modules are never the
+same fact.  If a proof that used to close now shows a goal that "should be
+reflexive", suspect the name before the arithmetic.
