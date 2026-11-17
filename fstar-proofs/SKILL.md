@@ -7962,6 +7962,41 @@ every time once the statement said the right thing.
 | the green core (`lemma_acc_lower`) and the stalled wrapper | `codec-strict-isomorphism` `probe-f42/VARINT_CANON.fst` |
 | the record | same change, `research.md` F60 |
 
+### Follow-up (2026-11-17): absolute indices are necessary, NOT sufficient
+
+Measured while retrying the same lemma.  Applying this section's rule
+*literally* — state the exponent as `7 * (q - 1)` in every frame — made
+`lemma_shift_is_7p` verify first try and **removed the off-by-one class
+entirely**.  The lemma still did not close, and the failure moved one node
+earlier.  Two things to take from that:
+
+1. **Two different "index" problems hide under one name.**  Fixing the
+   *exponent* is not fixing the *endpoint*.  Here the conclusion had to be
+   stated at the **start frame** (`shift = 0`), while every reachable frame
+   computes at `shift = 7 * p`; an absolute index in the exponent does not
+   move the endpoint.
+2. **When a recursive `let` returns a value built from an argument, SMT sees
+   that argument opaquely.**  `pow2 (7 * (p+1))` and `pow2 (7*p + 7)` are
+   **different application terms**; a lemma saying they are equal
+   (`lemma_pow2_add`) never *rewrites* them.  The probe that isolates this: in
+   a scratch copy, keep the two forms **syntactically identical** and the
+   recursive CALL is accepted; rewrite either side to the other's form and
+   `Error 19` appears at that node and nowhere else.  (Scope: the *call* was
+   checked, not the whole lemma — the full walk still had other obligations
+   open, so this is evidence about the node, not a proof of the lemma.)  This
+   is the `Z3 5.3.x lost instantiation` family (§116) with a sharper tell —
+   the differing subterms **look equal on the page**.
+
+**So the diagnostic order becomes:** (a) is the invariant absolute?  (b) is the
+*endpoint* the frame the recursion's conclusion lives in?  (c) do the two
+frames' terms denote the same thing by an APPLICATION the solver can see, or
+only by a lemma it will not rewrite?  (c) is not fixable by more statements;
+it needs a substitution (state the fact at one end and transport, §93 route 1).
+
+| what | where |
+|---|---|
+| the sharpened case (five shapes, one surviving node) | `codec-strict-isomorphism` `research.md` **F81** |
+
 ## 108. A `requires` you add to make a wrapper close can BE the counterexample's description
 
 Verified 2026-11-08 while assembling `law_bwd` for a canonical decimal decoder

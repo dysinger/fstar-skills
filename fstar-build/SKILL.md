@@ -219,7 +219,7 @@ installPhase = ''
 
 ### native Passthru — C11 from Custard
 
-The native passthru extracts with `--codegen Custard --custard_backend C` and
+The native passthru extracts with `--codegen C --custard_backend C` and
 ships the compiled library plus the header (§15 for the flags, and for the
 "one root file + `--custard_entry`" pattern when a package has several Pulse
 leaves):
@@ -299,7 +299,7 @@ OCaml modules must be compiled in dependency order. Compile leaf modules before 
 A package with **multiple INDEPENDENT Pulse leaves** (e.g. `Data.Image.Pulse`,
 `Data.Image.PNG.Pulse`, `Data.Image.QRCode.Pulse` — three enum-tag dispatchers
 that do NOT `open`/`include` each other) cannot be extracted by listing all
-three `.fst` files in ONE `--codegen Custard` invocation — `fstar.exe` fails with
+three `.fst` files in ONE `--codegen C` invocation — `fstar.exe` fails with
 **"Error 10: When using --ext fly_deps, only one file can be provided"**.  Nor can
 you loop `for m in …; do … --odir $out src/$m.fst` — each iteration re-emits the
 SAME `Custard.c`/`Custard.ml`/`Custard.fsproj` into `$out`, so only the LAST leaf
@@ -318,7 +318,7 @@ done
 # THEN one custard invocation rooted at ONE file, with ALL entry flags;
 # the other leaves resolve from cache via --include cache.
 ${fstar-exe} $PULSE_INCS --include cache --already_cached … \
-  --codegen Custard --custard_backend C --custard_monomorphize_types true \
+  --codegen C --custard_backend C --custard_monomorphize_types true \
   --custard_entry Data.Image.Pulse.encode_img_fmt \
   --custard_entry Data.Image.Pulse.decode_img_fmt \
   --custard_entry Data.Image.PNG.Pulse.encode_png_chunk \
@@ -965,8 +965,17 @@ uses `--no_default_includes`):
 
 ### Backend enum (authoritative)
 
+> ⚠ **`--codegen` takes `C`, NOT `Custard`.**  Measured 2026-11-17 on
+> `v2026.11.15+lsp`: `--codegen Custard` fails with
+> `error: wrong argument given to option 'codegen'` and the option's own help
+> prints `<OCaml|FSharp|KrmlC|KrmlRust|C|Cherry|Plugin>`.  The **frontend** is
+> Custard; the **backend selector** is `--custard_backend`, and the
+> `--codegen` value is just the target language.  Older notes that write
+> `--codegen Custard` are wrong for this toolchain.
+
 `--custard_backend` accepts exactly **`OCaml` (default) | `FSharp` | `KrmlC` |
-`KrmlRust` | `C`**.  There is **no wasm**.
+`KrmlRust` | `C`**.  There is **no wasm**.  `--codegen` additionally accepts
+`Cherry` (C + reference-counted heap cells, experimental) and `Plugin`.
 
 | Backend | Notes |
 |---|---|
@@ -982,7 +991,7 @@ Custard's C backend emits only `<stdint.h>`, `<stdlib.h>`, `<stdbool.h>`,
 ### Required flags for direct C
 
 ```bash
-fstar.exe --codegen Custard \
+fstar.exe --codegen C \
   --custard_backend C \
   --custard_monomorphize_types true \
   --custard_entry_module <Mod> \     # library mode (no main)
@@ -1461,3 +1470,56 @@ to be a valid store path` / pure-eval path restriction).  Use
 `git+file:///absolute/path/to/sibling` instead — it locks to the sibling's HEAD
 commit; switch to the published `github:<owner>/<repo>` input when the repo
 ships.
+
+## 21. A `nix build` that sits at 0% CPU is a HANG, not a slow build — bypass it and extract directly
+
+Verified 2026-11-17 on `fstar-codec` (`v2026.11.15+lsp`, aarch64-darwin).  The
+`native` derivation re-verifies `Data.Codec.Types` from cold **inside its own
+sandbox**, and that `fstar.exe` sat at **0% CPU for 15+ min** with no output —
+twice, in two separate invocations.  The same freeze reproduces when the
+derivation's verify loop is run by hand.  Per Mandate 3 the process is
+*stuck*, not working; `sleep` and retry is the wrong response.
+
+### The tell
+
+| symptom | meaning |
+|---|---|
+| `fstar.exe` at **0% CPU**, no stdout for minutes | stuck (non-terminating SMT query, or a blocked sandbox step) |
+| 100% CPU for many minutes | slow but working — a different problem |
+| `nix build` prints `building '...drv'...` then nothing | it is inside the derivation; you cannot see which module |
+
+### What to do instead
+
+Do **not** fight the derivation.  Run the two stages it performs, in your own
+shell, where you can see each module and put a hard timeout on each:
+
+```bash
+# 1. verify into a SHARED cache, one module at a time, timeout-guarded
+nix develop -c fstar.exe --no_default_includes --include "$ULIB" $PULSE_INCS \
+  --include ./src \
+  --already_cached Prims,FStar,Pulse.Nolib,Pulse.Lib,Pulse.Class,PulseCore \
+  --z3rlimit 120 --cache_checked_modules --cache_dir cache --odir cache \
+  src/<Mod>.fst
+
+# 2. extract from that cache, once, rooted
+nix develop -c fstar.exe --no_default_includes --include "$ULIB" $PULSE_INCS \
+  --include ./src --include cache \
+  --already_cached Prims,FStar,Pulse.Nolib,Pulse.Lib,Pulse.Class,PulseCore \
+  --cache_checked_modules --cache_dir cache \
+  --codegen C --custard_backend C --custard_monomorphize_types true \
+  --custard_entry <Mod>.encode_bytes --custard_entry <Mod>.decode_bytes \
+  --odir out src/<Mod>.fst
+```
+
+This produced `Custard.c` / `Custard.h` and compiled clean with
+`-Wall -Wextra -Werror` **in the same session** where `nix build` never got
+past module 1.  The manual path also tells you *which* module is slow, which
+the derivation's silence hides.
+
+### One measured detail that costs time
+
+**`--codegen C`, not `--codegen Custard`** (§15).  The wrong value fails
+instantly with `wrong argument given to option 'codegen'` — but inside a
+derivation that failure surfaces only *after* the long verify stage, so it
+reads as yet another hang.  Get the extraction command right and tested
+outside the derivation first.
