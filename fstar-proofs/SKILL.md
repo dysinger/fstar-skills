@@ -2150,9 +2150,13 @@ standard "is my tree clean?" check — you must `ls` for them explicitly.
 
 ### Safe removal (back up first)
 
+**Not `/tmp`.**  `/tmp` is cleared on reboot, so a backup there is gone by the
+next session while the `ls` that "confirmed" it was still in the transcript.
+Use a durable location:
+
 ```bash
-mkdir -p /tmp/<pkg>-stale-checked-backup
-cp src/*.checked /tmp/<pkg>-stale-checked-backup/ 2>/dev/null
+B="$HOME/.cache/xeno-backups/$(date +%Y%m%d-%H%M%S)-checked"
+mkdir -p "$B" && cp src/*.checked "$B"/ 2>/dev/null && ls "$B"
 rm src/*.checked
 ```
 
