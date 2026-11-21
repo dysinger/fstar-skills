@@ -8745,3 +8745,145 @@ the length fact is what the consumer actually needs.
 **Rule.** Two identically-named constants in different modules are never the
 same fact.  If a proof that used to close now shows a goal that "should be
 reflexive", suspect the name before the arithmetic.
+
+## 117. The local-vs-stdlib `seq_of_list` trade is REAL and cuts both ways — do not cite §109 to settle it
+
+Measured 2026-11-19 while porting `bytes` into `fstar-codec` (the finding is
+`codec-strict-isomorphism` F91).  It **qualifies §109(a)** and the
+two-constants note at the end of §116.  Read all three before touching a
+`seq_of_list` proof.
+
+### The two effects, both measured
+
+| what the proof needs | local `let rec seq_of_list` | stdlib `Seq.seq_of_list` |
+|---|---|---|
+| `length (seq_of_list l) == length l` | needs a lemma (§109(a)) | **free** (it is in the `val`) |
+| **the cons equation unfolds during induction** | **free** | needs the lemma *named at every step*, and often still fails |
+
+§109(a) measures the first row and concludes "use the stdlib".  That conclusion
+is right for *length* goals and **wrong for induction goals**.  A backward
+lemma of the shape
+
+```fstar
+ensures (match decode bs s with Some (_, n) -> Seq.slice s 0 n == seq_of_list bs | _ -> True)
+```
+
+recurses by cons and needs `seq_of_list (b::tl)` to *reduce* to
+`create 1 b ++ seq_of_list tl` **inside the goal**, at the same position SMT is
+comparing slices.  A named `lemma_seq_of_list_cons` call supplies the equation
+as a *separate* fact; SMT will not reassemble the slice/append algebra from it
+in the goal's shape.
+
+### The bisection that isolated it
+
+Six standalone reproductions of one identical proof body, varying only which
+`seq_of_list` is in scope.  The constants: same module preamble, same decoder,
+same `type byte = U8.t`, same `open FStar.List.Tot`.
+
+| variant | `seq_of_list` in scope | result |
+|---|---|---|
+| A | stdlib, `type byte` | ⛔ |
+| B | stdlib, `let byte` | ⛔ |
+| C | stdlib, `open FStar.List.Tot` | ⛔ |
+| **D** | **local `let rec`** | **✅** |
+| E | stdlib + explicit `lemma_seq_of_list_cons` bridge | ⛔ |
+| F | stdlib + named count + `Some?` requires | ⛔ |
+
+Nothing but the local definition works.  **So the choice is not stylistic:**
+- if the goal is a *length* fact, take the stdlib (§109(a) applies);
+- if the goal is an *induction over a cons list* whose conclusion mentions
+  `seq_of_list` at the same position, take a local definition **and** add the
+  length lemma — or expect to lose.
+
+### The portable fix, when you cannot choose the definition
+
+You usually cannot: the module already uses the stdlib everywhere else (the
+`bytes` encoder in `src/` emits `Seq.seq_of_list`).  Then the only reliable
+route is to bring the **local function** in as a *separate* name and prove the
+equality once — the recipe at the end of §116 — and base **only the induction
+lemma** on the local one:
+
+```fstar
+let rec seq_of_list_v (l: list byte) : Tot byte_seq = ...      (* local *)
+let lemma_seq_of_list_v_eq (l: list byte) : Lemma              (* bridge, once *)
+  (ensures Seq.seq_of_list l == seq_of_list_v l) (decreases l) = ...
+```
+
+This is route 1 in `codec-strict-isomorphism`'s T4.12.
+
+### Rule
+
+**A proof that closes in a spike module and fails after porting is a
+*definition-scope* difference, not a proof-text difference.**  Before rewriting
+the proof, list every function the spike defines **locally** that `src/`
+imports, and check whether the failing goal mentions one.  §109(a) and §116's
+cousin both concern the same name — and both can be read backwards.
+
+## 118. A decoder with an `if` chain in its body will not unfold — state the success BRANCH as a lemma
+
+Measured 2026-11-19 in `fstar-codec` (`text_v`, finding F90 in
+`codec-strict-isomorphism`).  Cost: one extra lemma per conditional decoder.
+This is the *forward* direction of §102 (§102 says SMT proves the unfolded
+equation but will not derive it from the call) and the sibling of §109(b)
+(a `match` under a constrained scrutinee stays opaque).
+
+### The failure
+
+A decoder written as a chain of guards
+
+```fstar
+let text_dec_v (expected input: byte_seq) : Tot (option (unit & remainder input)) =
+  let n = Seq.length expected in
+  if Seq.length input < n then None
+  else if Seq.eq (Seq.slice input 0 n) expected
+  then Some ((), Seq.slice input n (Seq.length input))
+  else None
+```
+
+and the law stated the obvious way
+
+```fstar
+let lemma_text_v_fwd (e r: byte_seq) : Lemma
+  (ensures text_dec_v e (Seq.append e r) = Some ((), r))
+  = Seq.lemma_len_append e r;
+    lemma_slice_append_prefix e r;
+    Seq.lemma_eq_intro (Seq.slice (Seq.append e r) (Seq.length e)
+                          (Seq.length (Seq.append e r))) r
+```
+
+fails with a bare **`Could not prove post-condition`** — no useful subgoal, no
+hint that the `if` is the problem.  All three needed facts are in context and
+true; the decoder simply does not reduce far enough for SMT to see it.
+
+### The fix that works
+
+State the **successful branch alone**, as its own lemma whose `requires` are
+exactly the guards, and call it:
+
+```fstar
+let lemma_text_v_ok (expected input: byte_seq) : Lemma
+  (requires Seq.length input >= Seq.length expected /\
+            Seq.eq (Seq.slice input 0 (Seq.length expected)) expected)
+  (ensures text_dec_v expected input
+             = Some ((), Seq.slice input (Seq.length expected) (Seq.length input)))
+  = ()
+```
+
+SMT then **inverts** the equation — from the value back to the guards — which
+is what the law needs, instead of unfolding the chain forward.
+
+### Why stating the whole decoder does not help
+
+Writing `dec = Some ((), slice …)` in the `requires` of the *main* lemma makes
+the main lemma circular: the goal is that same equation.  The branch lemma
+breaks the circle because its own `ensures` is *definitional* (it holds by
+reduction at concrete guards), so it costs nothing to prove.
+
+### Rule
+
+**A decoder with more than one guard gets a per-branch "this input takes this
+branch" lemma before any law about it.**  One lemma per conditional decoder,
+written once, reused by `law_fwd`, `law_bwd` and any test.  Do not classify the
+bare `Could not prove post-condition` as an arithmetic problem until the
+decoder's branch structure has been ruled out — check `--query_stats` for a
+goal that already contains the decoder applied to concrete-looking arguments.
