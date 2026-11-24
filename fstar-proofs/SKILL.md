@@ -8887,3 +8887,84 @@ written once, reused by `law_fwd`, `law_bwd` and any test.  Do not classify the
 bare `Could not prove post-condition` as an arithmetic problem until the
 decoder's branch structure has been ruled out — check `--query_stats` for a
 goal that already contains the decoder applied to concrete-looking arguments.
+
+## 119. A law that must quantify over `enc`'s image, not a side condition — move the value guard INTO `enc`
+
+Measured 2026-11-21 in `fstar-codec` (`codec-strict-isomorphism` F94/F95).
+This is the **constructive** counterpart to §92 (a value-dependent prop cannot
+be a record field) and to §91 (a "control" that never exercises the hypothesis).
+Cost: one guard per decoder that has a precondition, and one length/shape lemma
+for the backward direction.
+
+### The situation
+
+You want the paper-faithful law (PAPER §3.1), which has **no side condition**:
+
+```fstar
+law_fwd : (x) (e) (r) -> Lemma
+  (requires enc x = Some e)                       (* the domain IS enc's image *)
+  (ensures dec (Seq.append e r) = Some (x, r));
+```
+
+A combinator's decoder has a **precondition** the law does not state — e.g.
+`satisfy p` reads a byte and checks `p`; `pure x` always returns `x`;
+`count m c` reads exactly `m` elements.  Written naively, the law is **FALSE**:
+the decoder applies the check to a value `enc` was allowed to produce freely.
+
+### The two wrong fixes (both measured to fail)
+
+1. **Put the check back in the law** — `requires wfcv x = true /\ enc x = Some e
+   /\ ...`.  This is what the old conditional record did.  It works for a leaf
+   but a **composite cannot spend its own `wfcv`**: `product_v.wfcv (fst x)` is
+   a record-field projection of a value the `requires` is checked *before*, and
+   a recursive codec's `wfcv` field is opaque to SMT (no mutual `Lemma` can pin
+   it — `Error 133`).  This is why the conditional ABI could not carry `bytes`.
+2. **State the precondition as an extra hypothesis of the combinator's law
+   lemma** — it reintroduces a condition the paper does not have, and it does
+   not compose (the caller of the caller must supply it).
+
+### The fix that works, and generalizes
+
+**Fold the precondition into `enc`'s image.**  Make `enc` fail on values the
+decoder would reject, so `enc x = Some e` *implies* the precondition:
+
+```fstar
+(* satisfy p *)
+enc = (fun v -> if p v then Some (Seq.create 1 v) else None)
+(* pure x *)
+enc = (fun v -> if v = x then Some Seq.empty else None)
+(* count m c *)
+enc = (fun vs -> if List.length vs = m then count_enc c vs else None)   (* count_enc_m *)
+```
+
+Then `law_fwd` is true from `enc x = Some e` alone.  **Three independent
+instances in one migration** (`satisfy_v`, `pure_v`, `count_v`) — it is the
+defining discipline, not a one-off.  It also matches `enc : a -> option byte_seq`
+having been made partial by type (§92's `[W3]`).
+
+### The backward direction pays once, per shape
+
+`law_bwd` needs the *unfolding* of the guard: `count` must turn
+`count_enc_m c m vs = Some e` back into `count_enc c vs = Some e`, which needs
+"a decode of exactly `m` returns a length-`m` list":
+
+```fstar
+let rec lemma_count_dec_v_len (c) (m) (s) (vs) (r)
+  : Lemma (requires count_dec_v c m s = Some (vs, r))
+          (ensures List.length vs = m) (decreases m) = ...
+```
+
+One such length/shape lemma per guarded `enc`, and then `law_bwd` is the usual
+witness (the consumed prefix), which is `encf` again.  Measured: `count_v`
+0 admit with `lemma_count_dec_v_len`; `product_v`/`sum_v`/`map_v`/`label_v`
+need **no** guard at all (`map_v` supplies its retract as the `iso`'s own law,
+`[W5]` closed).
+
+### Rule
+
+**When a law is false only because the decoder rejects values `enc` still
+produces, do not add a hypothesis — make `enc` partial on exactly that set.**
+The idiom is `enc v = if (precondition v) then (real encoding) else None`, with
+one `lemma_<dec>_len`/`_shape` to unfold it in `law_bwd`.  Reserve side
+conditions for facts about the *remainder/prefix* that no `enc` can carry
+(§92); a precondition on the *value* belongs in `enc`'s image.
