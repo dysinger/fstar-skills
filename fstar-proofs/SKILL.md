@@ -8819,6 +8819,15 @@ the proof, list every function the spike defines **locally** that `src/`
 imports, and check whether the failing goal mentions one.  §109(a) and §116's
 cousin both concern the same name — and both can be read backwards.
 
+> **⚠ SUPERSEDED IN PART (2026-11-21, F96 — see §120).**  The "portable fix"
+> above was recommended for `fstar-codec`'s `bytes` and **does not work there**:
+> the bridge `seq_of_list_v l == Seq.seq_of_list l` is unprovable from outside
+> `FStar.Seq.Base` (`spike-bytes-v2-route1-bridge.fst` ⛔), so "prove the
+> equality once" costs an `assume`.  `bytes` was instead done by a
+> **different construction** that never mentions `seq_of_list` at all.  Read
+> §120 before starting a local-definition port: the cheapest fix is often not
+> to port the definition.
+
 ## 118. A decoder with an `if` chain in its body will not unfold — state the success BRANCH as a lemma
 
 Measured 2026-11-19 in `fstar-codec` (`text_v`, finding F90 in
@@ -8968,3 +8977,63 @@ The idiom is `enc v = if (precondition v) then (real encoding) else None`, with
 one `lemma_<dec>_len`/`_shape` to unfold it in `law_bwd`.  Reserve side
 conditions for facts about the *remainder/prefix* that no `enc` can carry
 (§92); a precondition on the *value* belongs in `enc`'s image.
+
+## 120. A spike proof that will not port: first ask whether a DIFFERENT construction avoids the local definition entirely
+
+Measured 2026-11-21 in `fstar-codec` (`bytes_v`, finding F96 in
+`codec-strict-isomorphism`; complements §117 and is the resolution of §117's
+own remedy).  Cost of ignoring this: two dead routes, ~13 spike modules and
+two sessions (§117's local-definition port, and §117's route 1 as a *bridge*).
+
+### What happened
+
+`bytes`'s spike proof could not port because its backward lemma rested on a
+local `seq_of_list` (§117).  §117's remedy — port the local function, prove it
+equal to the stdlib's — was tried and **failed on its own terms**: the bridge
+lemma `seq_of_list_v l == Seq.seq_of_list l` is not provable from outside
+`FStar.Seq.Base`, so "one equality lemma" is really one `assume`:
+
+```fstar
+(* spike-bytes-v2-route1-bridge.fst  ->  Error 19 on the base case *)
+let lemma_seq_of_list_v_eq (l: list byte) : Lemma
+  (ensures Seq.seq_of_list l == seq_of_list_v l) = ...
+```
+
+The fix was structural, not local: build the combinator **the way the paper
+builds it**, which turns out never to mention `seq_of_list`:
+
+```fstar
+let rec bytes_v (bs: list byte) : Tot (codec_v2 unit) (decreases bs) =
+  match bs with
+  | [] -> pure_v ()
+  | b :: tl -> (* product_v (byte_val_v b) (bytes_v tl), pair collapsed *) ...
+```
+
+It verified **first try, 0 admit, with no new lemma** — the value handed to
+`product_v` is `((), ())` on both sides, so both laws are `product_v`'s own
+fields applied at that pair (`unit` has one inhabitant).
+
+### The rule
+
+**"A proof resting on a local definition will not port" is a property of the
+*route*, not of the combinator.**  Before spending a lemma (or an `assume`) to
+port a local definition, ask:
+
+1. Does a **different construction of the same combinator** avoid the local
+   definition altogether?  Check the paper: a combinator built as the paper
+   builds it (here `text` as `many'` over a byte alphabet, PAPER §6.1) often
+   decomposes onto combinators that are *already* ported.
+2. Is the local definition needed at all, or only by the **one lemma** you
+   chose to port?  A backward law usually has many equational statements; the
+   one over a different decomposition needs nothing extra.
+
+If neither holds, then read §117 (local definition + its length lemma; note the
+bridge caveat above).
+
+### Corollary — a first-try port is a signal, not a formality
+
+`bytes_v` verifying first try is exactly what a correct *construction* looks
+like on a settled ABI.  If a transcription fights (§117/§118 style, six probes
+of bisection), suspect the construction or the route, in that order, before
+suspecting the solver's budget.
+
