@@ -9037,3 +9037,97 @@ like on a settled ABI.  If a transcription fights (§117/§118 style, six probes
 of bisection), suspect the construction or the route, in that order, before
 suspecting the solver's budget.
 
+## 121. A "facet" of a combinator algebra: classify it (derivation / lens / definition) BEFORE porting — and check whether its fold is a bijection
+
+Measured 2026-11-21 in `fstar-codec` (T4.2b's six facets, finding F98 in
+`codec-strict-isomorphism`).  Cost of ignoring this: a plan that says "each
+facet is one `map`-with-`iso` step" is wrong for five of six, and one facet is
+then found *unprovable* after the transcription has been started.
+
+### What happened
+
+A task listed six derived combinators of a codec algebra and recorded the
+expectation, honestly flagged as unmeasured, that "each is one `map`-with-`iso`
+step over the product/sum combinators".  Spiked in one batch, the expectation
+held for **one** of the six.  The six fell into three classes:
+
+| facet | what it actually is |
+|---|---|
+| `then_drop`, `drop_then` | a **lens** — project the pair's component directly, `snd`/`fst`. A `map` step would also work but must push the hypothesis through the product's two-component law; the lens closes in one step. |
+| `between` | the library's own **definition** — `drop_then (then_drop open c) close`. No new proof: two instances. |
+| `take n` | a **definition** — `count n token`. So a *definition*, not a derivation — no obligation at all. |
+| `optional` | genuinely the **`map`-with-`iso` step**: `either a unit -> option a` is a bijection, so the `iso`'s two laws are reflexivity. |
+| `choice` | **not provable** — see below. |
+
+### The rule for classifying
+
+Before porting a derived combinator, ask in this order:
+
+1. **Is it a definition?**  `grep` the legacy source for `let <name> … = ` with
+   no proof obligations.  If yes, it is transcription, and re-proving its
+   ingredients is scope creep.
+2. **Is it a lens?**  If its value type is a projection of a product the
+   library already encodes, write the two body matches and thread the
+   component laws — usually one step per direction, no `iso`.
+3. **Is it a fold over a sum?**  Then it is a `map` step **iff the collapsing
+   map is a bijection.**  This is the checkable criterion, and it decides
+   provability *before* any proof attempt:
+
+   - `either a unit -> option a` (`Inl x <-> Some x`, `Inr () <-> None`) — a
+     bijection, so the `iso` exists and `map` applies: **provable**.
+   - `either a a -> a` — no inverse: whichever way it collapses, one of
+     `iso_fg`/`iso_gf` is false on the other injective side.  So it is **not**
+     a `map` step, and writing it directly fails too (below).
+
+### The `choice` obstruction, stated so it is recognised again
+
+The obvious direct definition — "c1 dominates", i.e. branch on
+`Some? (c1.enc x)` — has a **forward law that closes** and a **backward law
+that does not**.  The backward law's second branch must derive
+`c1.enc x = None` from the tagged decode `sum_dec c1 c2 s = Some (Inr x, r)`,
+but the tag records only *which summand's decoder ran*, never what the *other*
+codec encodes.  The failure is exactly
+
+    Failed to prove: c1.enc x = FStar.Pervasives.Native.None
+
+The missing fact is a **disjointness side condition**
+
+    choice_ok c1 c2  =  forall x.  Some? (c1.enc x) \/ not (Some? (c2.enc x))
+
+and §119's discipline says it must live in `enc`'s image **or as a
+parameter** — never in the law.  That makes it a *design* decision, not a proof
+obligation, so the right move is to stop and choose a shape, not to keep
+trying tactics:
+
+- caller-supplied tag (`choice_tagged (is_left: a -> bool) …`) — weakens the
+  type, keeps the law;
+- `choice (h: choice_ok c1 c2) …` — keeps the type, pushes the obligation
+  onto every caller.
+
+### Corollary — a fact about `enc` is not a fact about `dec`
+
+Reconfirmed here, and worth its own line because it is the wrong first guess.
+The same helper lemma closes with the **decoder** fact in `requires`
+
+    requires c1.dec (Seq.append e1 r) = Some (x, r) /\ e == Seq.cons 0x00uy e1
+
+and FAILS with the **encoder** fact instead
+
+    requires c1.enc x = Some e1 /\ e == Seq.cons 0x00uy e1
+
+SMT needs the *decoder* to unfold; an `enc` fact leaves the goal opaque.  So
+when §118's branch lemma is needed, put the **decoder's** result in the
+hypothesis, not the encoder's.  (Same family as §109(b): a `match` under a
+constrained scrutinee stays opaque.)
+
+### Also measured here — two more instances of §118
+
+The `text_v` tax recurred twice in one module, in shapes §118 does not name:
+
+- a decoder that matches on a **tuple pattern** (`Some (Inr (), r)`) does not
+  unfold; collapse it to a single outer match and an inner match on the
+  payload.
+- a decoder whose scrutinee is a **refolded record** (`sum_dec c (pure_v ()) s`
+  where `pure_v ()` is rebuilt) does not unfold; take the decoder's *result*
+  as a hypothesis.
+
