@@ -9057,7 +9057,7 @@ held for **one** of the six.  The six fell into three classes:
 | `between` | the library's own **definition** — `drop_then (then_drop open c) close`. No new proof: two instances. |
 | `take n` | a **definition** — `count n token`. So a *definition*, not a derivation — no obligation at all. |
 | `optional` | genuinely the **`map`-with-`iso` step**: `either a unit -> option a` is a bijection, so the `iso`'s two laws are reflexivity. |
-| `choice` | **not provable** — see below. |
+| `choice` | **not provable *as stated*** — the condition was wrong, not the combinator. See below, and **§122**: `choice` DOES close with `disjoint_all` as a parameter. |
 
 ### The rule for classifying
 
@@ -9090,19 +9090,31 @@ codec encodes.  The failure is exactly
 
     Failed to prove: c1.enc x = FStar.Pervasives.Native.None
 
-The missing fact is a **disjointness side condition**
+> **⚠ CORRECTED (2026-11-21, §122).**  The formula written here,
+>
+>     choice_ok c1 c2  =  forall x.  Some? (c1.enc x) \/ not (Some? (c2.enc x))
+>
+> is **the wrong condition**, and it is why this section says "not provable".
+> It is *disjunctive*, and the left disjunct alone makes it true — so it holds
+> when **both** codecs encode the same value, the one case `choice` cannot
+> resolve.  `choice` DOES close, with **disjointness**
+> (`forall y. ~(Some? (c1.enc y) /\ Some? (c2.enc y))`) as a **parameter** — measured
+> 0-admit.  Read §122 before acting on the "design decision" below; the
+> decision has since been made the other way from what this section implies.
+>
+> The transferable lesson from the mistake: **a `\/`-shaped condition whose
+> left disjunct can be true on its own constrains nothing.**  When a
+> "disjointness" fact is written with `\/`, check it against the pair
+> `c1 = c2 = fun _ => Some []` — that pair must FALSIFY it, or it is not
+> disjointness.
 
-    choice_ok c1 c2  =  forall x.  Some? (c1.enc x) \/ not (Some? (c2.enc x))
+§119's discipline still applies: the missing fact must live in `enc`'s image
+**or as a parameter** — never in the law.  Two shapes were on the table:
 
-and §119's discipline says it must live in `enc`'s image **or as a
-parameter** — never in the law.  That makes it a *design* decision, not a proof
-obligation, so the right move is to stop and choose a shape, not to keep
-trying tactics:
-
-- caller-supplied tag (`choice_tagged (is_left: a -> bool) …`) — weakens the
-  type, keeps the law;
-- `choice (h: choice_ok c1 c2) …` — keeps the type, pushes the obligation
-  onto every caller.
+- caller-supplied tag (`choice_tagged (is_left: a -> bool) …`) — **rejected**
+  (§122): it cannot populate a record, because its backward law needs a fact
+  about the particular byte string being decoded;
+- `choice (h: disjoint_all c1 c2) …` as a `squash` parameter — **this one works**.
 
 ### Corollary — a fact about `enc` is not a fact about `dec`
 
@@ -9131,3 +9143,90 @@ The `text_v` tax recurred twice in one module, in shapes §118 does not name:
   where `pure_v ()` is rebuilt) does not unfold; take the decoder's *result*
   as a hypothesis.
 
+
+---
+
+## 122. A proof that will not close may have a FALSE statement — refute the premise before strengthening the proof; and a `prop` naming a fact is opaque to SMT
+
+Measured 2026-11-21 in `fstar-codec` (finding F101 in
+`codec-strict-isomorphism`).  Cost of missing it: a full session spent
+strengthening a proof of a statement that is not a theorem.
+
+### The shape of the failure
+
+A combinator's backward law needed
+
+    Failed to prove: c1.enc x = FStar.Pervasives.Native.None
+
+from `choice_ok c1 c2 x` (a "disjointness" condition inherited from an earlier
+finding) plus a tagged decode.  Every tactic failed: minimal probes, `squash`
+arguments, `unfold let`, `forall_intro`, naming the member fact.  Each failure
+looked like a fresh clue, so the session kept going.
+
+It never closed because **the statement is false.**  The inherited condition was
+
+    choice_ok c1 c2  =  forall x.  Some? (c1.enc x) \/ ~(Some? (c2.enc x))
+
+The LEFT disjunct alone makes it true, so it is satisfied when **both** codecs
+encode the same value — precisely the case the combinator cannot resolve.  It
+therefore entails nothing about which arm ran.
+
+**The model, and this is the whole diagnosis — prove it in four lines:**
+
+    let c1 : c int = { enc = fun _ -> Some (Seq.empty #byte) }
+    let c2 : c int = { enc = fun _ -> Some (Seq.empty #byte) }
+    let premises_consistent : Lemma
+      (choice_ok c1 c2 0 /\ Some? (c1.enc 0) /\ Some? (c2.enc 0)) = ()
+    (* Verified module — all three premises hold at once, so "… => False" is
+       not a theorem and no --z3rlimit will ever prove it. *)
+
+The fix was to state the condition correctly — **disjointness**:
+
+    disjoint     c1 c2 x = ~(Some? (c1.enc x) /\ Some? (c2.enc x))
+    disjoint_all c1 c2   = forall y. disjoint c1 c2 y
+
+With that as a **parameter**, both laws verify, 0 admit, **at the default
+`--z3rlimit`**, with no side condition in either law (the parameter discipline
+of §119/§92).
+
+### The rule
+
+**When a proof will not close and its statement came from an earlier finding,
+refute the statement first.**  Concretely, before the third tactic:
+
+1. **Construct a model** of the hypotheses under which the goal is false.
+   Smallest interesting pair is usually `c1 = c2` and a constant encoder.
+2. If a model exists, the statement is false — stop proving, fix the statement.
+3. Only if no model exists is it a proof problem, and then §118/§105 apply.
+
+A session that had been asked to *prove* failed; a subagent asked to **bisect**
+(the same instruction as "find where it breaks") found it in one pass.  **A
+bisect question is a cheaper first move than a proof question.**
+
+### Companion: a `prop` that NAMES a fact is opaque to SMT at a hypothesis
+
+Measured with six probes when the goal *was* true.  Same statement, six
+deliveries:
+
+| how the fact reaches SMT | delivered? |
+|---|---|
+| inline in `requires` | ✅ |
+| a `prop` **definition** in `requires` | ❌ |
+| the same, `unfold let` | ❌ |
+| a `prop` **argument** (not in `requires`) | ❌ |
+| instantiated from a function argument (`h x`) | ❌ |
+| a **`squash` argument** | ✅ |
+
+So a `prop`-valued helper that names a fact is useless at a hypothesis.
+**`squash` it** (this is also why `iso`'s inverse laws in `codec_v2` are
+consumed as `squash`-ed parameters, §92) or write the fact inline.  It follows
+that a combinator taking such a fact should take `pf: squash (P c1 c2 …)` in
+its signature — the parameter discipline and the SMT discipline agree.
+
+| what | where |
+|---|---|
+| the decision and the model | `codec-strict-isomorphism/research.md` F101 |
+| the proving module (0 admit, no rlimit) | `codec-strict-isomorphism/spike-f100-choice-shape.fst` |
+| the record | same change, `research.md` F101 |
+
+---
